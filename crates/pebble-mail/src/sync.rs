@@ -382,7 +382,10 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
         || lower.contains("connection aborted")
         || lower.contains("broken pipe")
         || lower.contains("connection closed")
+        || lower.contains("closed connection")
+        || lower.contains("tls close_notify")
         || lower.contains("unexpected eof")
+        || lower.contains("unexpected-eof")
         || lower.contains("timed out")
         || lower == "not connected"
 }
@@ -2143,6 +2146,16 @@ mod tests {
     fn imap_windows_connection_abort_is_retryable_for_polling() {
         let error = pebble_core::PebbleError::Network(
             "SELECT failed: io: 你的主机中的软件中止了一个已建立的连接。 (os error 10053)"
+                .to_string(),
+        );
+
+        assert!(is_retryable_imap_connection_error(&error));
+    }
+
+    #[test]
+    fn imap_rustls_unexpected_eof_is_retryable_for_polling() {
+        let error = pebble_core::PebbleError::Network(
+            "SELECT failed: io: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"
                 .to_string(),
         );
 
