@@ -393,6 +393,7 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
 }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
+  const overlayMouseDown = useRef(false);
   const emailInputRef = useRef<HTMLInputElement>(null);
   const [displayName, setDisplayName] = useState(account.display_name);
   const [email, setEmail] = useState(account.email);
@@ -574,7 +575,11 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
         justifyContent: "center",
         zIndex: 1000,
       }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onMouseDown={(e) => { overlayMouseDown.current = e.target === e.currentTarget; }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && overlayMouseDown.current) onClose();
+        overlayMouseDown.current = false;
+      }}
     >
       <div
         style={{

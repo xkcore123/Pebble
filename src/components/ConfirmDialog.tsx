@@ -34,6 +34,7 @@ export default function ConfirmDialog({
 }: Props) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
+  const overlayMouseDown = useRef(false);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const onConfirmRef = useRef(onConfirm);
@@ -92,8 +93,10 @@ export default function ConfirmDialog({
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
       aria-describedby="confirm-dialog-message"
+      onMouseDown={(e) => { overlayMouseDown.current = e.target === e.currentTarget; }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+        if (e.target === e.currentTarget && overlayMouseDown.current) onCancel();
+        overlayMouseDown.current = false;
       }}
       style={{
         position: "fixed",

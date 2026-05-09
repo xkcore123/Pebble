@@ -104,6 +104,7 @@ export default function AccountSetup({ onClose }: Props) {
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const dialogRef = useRef<HTMLDivElement>(null);
+  const overlayMouseDown = useRef(false);
   const formRef = useRef(form);
   formRef.current = form;
 
@@ -307,10 +308,12 @@ export default function AccountSetup({ onClose }: Props) {
         justifyContent: "center",
         zIndex: 1000,
       }}
+      onMouseDown={(e) => { overlayMouseDown.current = e.target === e.currentTarget; }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) {
+        if (e.target === e.currentTarget && overlayMouseDown.current) {
           void requestClose();
         }
+        overlayMouseDown.current = false;
       }}
     >
       <div

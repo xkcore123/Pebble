@@ -347,6 +347,7 @@ function DiagnosticLogDialog({
   onClose: () => void;
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const overlayMouseDown = useRef(false);
   const snapshot = state.status === "ready" ? state.snapshot : null;
 
   useEffect(() => {
@@ -373,8 +374,10 @@ function DiagnosticLogDialog({
       role="dialog"
       aria-modal="true"
       aria-labelledby="diagnostic-log-title"
+      onMouseDown={(e) => { overlayMouseDown.current = e.target === e.currentTarget; }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && overlayMouseDown.current) onClose();
+        overlayMouseDown.current = false;
       }}
       style={{
         position: "fixed",
