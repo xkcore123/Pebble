@@ -685,7 +685,7 @@ pub async fn test_account_connection(
         credentials.proxy_mode,
         credentials.imap.proxy.clone(),
     )?;
-    pebble_mail::ImapProvider::test_connection(&credentials.imap).await
+    pebble_mail::ImapProvider::test_connection_with_login(&credentials.imap).await
 }
 
 #[tauri::command]

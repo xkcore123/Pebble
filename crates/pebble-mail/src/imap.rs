@@ -351,7 +351,7 @@ impl ImapProvider {
     }
 
     /// Whether this host requires an RFC 2971 ID command before LOGIN
-    /// (Netease/163/126/188 servers reject as "Unsafe Login" without it).
+    /// (Coremail-based servers reject as "Unsafe Login" without it).
     fn needs_id_command(&self) -> bool {
         let h = self.config.host.to_lowercase();
         h.contains("163.com")
@@ -361,6 +361,9 @@ impl ImapProvider {
             || h.contains("netease.com")
             || h.contains("sina.com")
             || h.contains("sina.cn")
+            || h.contains("qq.com")
+            || h.contains("exmail.qq.com")
+            || h.contains("tencent.com")
     }
 
     /// Send IMAP ID command on a raw stream, returning the greeting bytes

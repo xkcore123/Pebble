@@ -1169,6 +1169,10 @@ impl SyncWorker {
                                 "Poll retry failed for folder {} account {} after reconnect: {}",
                                 folder.name, self.base.account_id, retry_error
                             );
+                            self.base.emit_error(
+                                "poll",
+                                &format!("Poll retry failed for folder {}: {}", folder.name, retry_error),
+                            );
                             if is_retryable_imap_connection_error(&retry_error) {
                                 return Some(retry_error);
                             }
@@ -1188,6 +1192,10 @@ impl SyncWorker {
                 warn!(
                     "Poll failed for folder {} account {}: {}",
                     folder.name, self.base.account_id, e
+                );
+                self.base.emit_error(
+                    "poll",
+                    &format!("Poll failed for folder {}: {}", folder.name, e),
                 );
                 None
             }
