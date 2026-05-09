@@ -327,10 +327,12 @@ async fn replay_remote_archive(
         ProviderType::Outlook => {
             let target_remote_id =
                 target_folder_remote_id(state, message, payload, FolderRole::Archive)?;
-            connect_outlook(state, &message.account_id)
+            let new_remote_id = connect_outlook(state, &message.account_id)
                 .await?
                 .move_message(&message.remote_id, &target_remote_id)
-                .await
+                .await?;
+            state.store.update_remote_id(&message.id, &new_remote_id)?;
+            Ok(())
         }
         ProviderType::Imap => {
             let source_remote_id = source_folder_remote_id(state, message, payload)?;
@@ -369,17 +371,21 @@ async fn replay_remote_restore(
             }
         }
         ProviderType::Outlook => {
-            if let Some(target_remote_id) = string_field(payload, "target_folder_remote_id") {
+            let new_remote_id = if let Some(target_remote_id) =
+                string_field(payload, "target_folder_remote_id")
+            {
                 connect_outlook(state, &message.account_id)
                     .await?
                     .move_message(&message.remote_id, &target_remote_id)
-                    .await
+                    .await?
             } else {
                 connect_outlook(state, &message.account_id)
                     .await?
                     .restore_message(&message.remote_id)
-                    .await
-            }
+                    .await?
+            };
+            state.store.update_remote_id(&message.id, &new_remote_id)?;
+            Ok(())
         }
         ProviderType::Imap => {
             let source_remote_id = source_folder_remote_id(state, message, payload)?;
@@ -421,7 +427,9 @@ async fn replay_remote_delete(
                     .delete_message_permanently(&message.remote_id)
                     .await
             } else {
-                provider.trash_message(&message.remote_id).await
+                let new_remote_id = provider.trash_message(&message.remote_id).await?;
+                state.store.update_remote_id(&message.id, &new_remote_id)?;
+                Ok(())
             }
         }
         ProviderType::Imap => {
@@ -475,10 +483,12 @@ async fn replay_remote_move_to_folder(
         ProviderType::Outlook => {
             let target_remote_id =
                 target_folder_remote_id(state, message, payload, FolderRole::Inbox)?;
-            connect_outlook(state, &message.account_id)
+            let new_remote_id = connect_outlook(state, &message.account_id)
                 .await?
                 .move_message(&message.remote_id, &target_remote_id)
-                .await
+                .await?;
+            state.store.update_remote_id(&message.id, &new_remote_id)?;
+            Ok(())
         }
         ProviderType::Imap => {
             let source_remote_id = source_folder_remote_id(state, message, payload)?;

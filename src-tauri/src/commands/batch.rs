@@ -151,7 +151,11 @@ pub async fn batch_archive(
                             };
                             for msg in messages {
                                 match provider.move_message(&msg.remote_id, &af.remote_id).await {
-                                    Ok(_) => remote_succeeded.push(msg.id.clone()),
+                                    Ok(new_remote_id) => {
+                                        let _ =
+                                            state.store.update_remote_id(&msg.id, &new_remote_id);
+                                        remote_succeeded.push(msg.id.clone());
+                                    }
                                     Err(e) => {
                                         warn!("Outlook batch archive failed for {}: {e}", msg.id);
                                         queue_batch_pending_op(
@@ -334,7 +338,10 @@ pub async fn batch_delete(
                     ConnectedProvider::Outlook(provider) => {
                         for msg in messages {
                             match provider.trash_message(&msg.remote_id).await {
-                                Ok(_) => deleted_ids.push(msg.id.clone()),
+                                Ok(new_remote_id) => {
+                                    let _ = state.store.update_remote_id(&msg.id, &new_remote_id);
+                                    deleted_ids.push(msg.id.clone());
+                                }
                                 Err(e) => {
                                     warn!("Outlook batch delete failed for {}: {e}", msg.id);
                                     queue_batch_pending_op(

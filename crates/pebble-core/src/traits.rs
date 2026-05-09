@@ -94,7 +94,7 @@ pub trait MailTransport: Send + Sync {
 #[async_trait]
 pub trait FolderProvider: Send + Sync {
     async fn list_folders(&self) -> Result<Vec<Folder>>;
-    async fn move_message(&self, remote_id: &str, to_folder_id: &str) -> Result<()>;
+    async fn move_message(&self, remote_id: &str, to_folder_id: &str) -> Result<String>;
 }
 
 #[async_trait]

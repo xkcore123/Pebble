@@ -107,7 +107,7 @@ impl FolderProvider for ImapMailProvider {
         self.inner.list_folders(&self.account_id).await
     }
 
-    async fn move_message(&self, _remote_id: &str, _to_folder_id: &str) -> Result<()> {
+    async fn move_message(&self, _remote_id: &str, _to_folder_id: &str) -> Result<String> {
         // Note: actual IMAP move is done via ImapProvider::move_message directly,
         // because FolderProvider::move_message uses remote IDs, not UIDs.
         // The Tauri command layer handles UID lookup and calls inner() directly.

@@ -707,8 +707,8 @@ impl FolderProvider for GmailProvider {
             .collect())
     }
 
-    async fn move_message(&self, remote_id: &str, to_folder_id: &str) -> Result<()> {
-        // Gmail "move" is implemented as label modification
+    async fn move_message(&self, remote_id: &str, to_folder_id: &str) -> Result<String> {
+        // Gmail "move" is implemented as label modification; the message ID stays the same.
         let body = serde_json::json!({ "addLabelIds": [to_folder_id] });
         let url = format!("{GMAIL_API_BASE}/messages/{remote_id}/modify");
         let resp = self.post_json(&url, &body).await?;
@@ -718,7 +718,7 @@ impl FolderProvider for GmailProvider {
                 "Failed to move message (status {status})"
             )));
         }
-        Ok(())
+        Ok(remote_id.to_string())
     }
 }
 

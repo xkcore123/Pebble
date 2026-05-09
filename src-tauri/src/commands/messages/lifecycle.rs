@@ -134,7 +134,10 @@ pub async fn archive_message(
                         .move_message(&msg.remote_id, &inbox.remote_id)
                         .await
                     {
-                        Ok(()) => RemoteMutationOutcome::Applied,
+                        Ok(new_remote_id) => {
+                            state.store.update_remote_id(&msg.id, &new_remote_id)?;
+                            RemoteMutationOutcome::Applied
+                        }
                         Err(e) => {
                             let error = e.to_string();
                             let outcome = queue_pending_remote_op(
@@ -301,7 +304,10 @@ pub async fn archive_message(
                             .move_message(&msg.remote_id, &archive_folder.remote_id)
                             .await
                         {
-                            Ok(()) => RemoteMutationOutcome::Applied,
+                            Ok(new_remote_id) => {
+                                state.store.update_remote_id(&msg.id, &new_remote_id)?;
+                                RemoteMutationOutcome::Applied
+                            }
                             Err(e) => {
                                 let error = e.to_string();
                                 let outcome = queue_pending_remote_op(
@@ -556,35 +562,54 @@ pub async fn delete_message(
         },
         ProviderType::Outlook => match connect_outlook(&state, &msg.account_id).await {
             Ok(provider) => {
-                let result = if is_permanent {
-                    provider.delete_message_permanently(&msg.remote_id).await
-                } else {
-                    provider.trash_message(&msg.remote_id).await
-                };
-                match result {
-                    Ok(()) => RemoteMutationOutcome::Applied,
-                    Err(e) => {
-                        let error = e.to_string();
-                        let outcome = queue_pending_remote_op(
-                            &state,
-                            &msg,
-                            if is_permanent {
-                                "delete_permanent"
-                            } else {
-                                "delete"
-                            },
-                            json!({
-                                "source_folder_id": &source_folder.id,
-                                "source_folder_remote_id": &source_folder.remote_id,
-                                "trash_folder_id": trash_folder.as_ref().map(|f| f.id.as_str()),
-                                "permanent": is_permanent,
-                            }),
-                            &error,
-                        )?;
-                        if !remote_mutation_allows_local_commit(outcome) {
-                            return Err(queued_remote_error("delete", &error));
+                if is_permanent {
+                    match provider.delete_message_permanently(&msg.remote_id).await {
+                        Ok(()) => RemoteMutationOutcome::Applied,
+                        Err(e) => {
+                            let error = e.to_string();
+                            let outcome = queue_pending_remote_op(
+                                &state,
+                                &msg,
+                                "delete_permanent",
+                                json!({
+                                    "source_folder_id": &source_folder.id,
+                                    "source_folder_remote_id": &source_folder.remote_id,
+                                    "trash_folder_id": trash_folder.as_ref().map(|f| f.id.as_str()),
+                                    "permanent": is_permanent,
+                                }),
+                                &error,
+                            )?;
+                            if !remote_mutation_allows_local_commit(outcome) {
+                                return Err(queued_remote_error("delete", &error));
+                            }
+                            outcome
                         }
-                        outcome
+                    }
+                } else {
+                    match provider.trash_message(&msg.remote_id).await {
+                        Ok(new_remote_id) => {
+                            state.store.update_remote_id(&msg.id, &new_remote_id)?;
+                            RemoteMutationOutcome::Applied
+                        }
+                        Err(e) => {
+                            let error = e.to_string();
+                            let outcome = queue_pending_remote_op(
+                                &state,
+                                &msg,
+                                "delete",
+                                json!({
+                                    "source_folder_id": &source_folder.id,
+                                    "source_folder_remote_id": &source_folder.remote_id,
+                                    "trash_folder_id": trash_folder.as_ref().map(|f| f.id.as_str()),
+                                    "permanent": is_permanent,
+                                }),
+                                &error,
+                            )?;
+                            if !remote_mutation_allows_local_commit(outcome) {
+                                return Err(queued_remote_error("delete", &error));
+                            }
+                            outcome
+                        }
                     }
                 }
             }
@@ -799,7 +824,10 @@ pub async fn restore_message(
         },
         ProviderType::Outlook => match connect_outlook(&state, &msg.account_id).await {
             Ok(provider) => match provider.restore_message(&msg.remote_id).await {
-                Ok(()) => RemoteMutationOutcome::Applied,
+                Ok(new_remote_id) => {
+                    state.store.update_remote_id(&msg.id, &new_remote_id)?;
+                    RemoteMutationOutcome::Applied
+                }
                 Err(e) => {
                     let error = e.to_string();
                     let outcome = queue_pending_remote_op(
@@ -972,7 +1000,8 @@ pub async fn move_to_folder(
                         .move_message(&msg.remote_id, &target_folder.remote_id)
                         .await
                     {
-                        Ok(()) => {
+                        Ok(new_remote_id) => {
+                            state.store.update_remote_id(&msg.id, &new_remote_id)?;
                             info!(
                                 "Moved Outlook message {} to folder {}",
                                 message_id, target_folder.name

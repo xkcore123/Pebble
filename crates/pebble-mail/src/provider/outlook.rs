@@ -697,7 +697,7 @@ impl FolderProvider for OutlookProvider {
             .collect())
     }
 
-    async fn move_message(&self, remote_id: &str, to_folder_id: &str) -> Result<()> {
+    async fn move_message(&self, remote_id: &str, to_folder_id: &str) -> Result<String> {
         let body = GraphMoveRequest {
             destination_id: to_folder_id.to_string(),
         };
@@ -710,7 +710,18 @@ impl FolderProvider for OutlookProvider {
                 "Failed to move message (status {status}): {text}"
             )));
         }
-        Ok(())
+        // Graph API assigns a new message ID on every folder move.
+        // Parse the response to capture it, otherwise subsequent
+        // operations (delete, restore) would use a stale ID.
+        let moved: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| PebbleError::Network(format!("Failed to parse move response: {e}")))?;
+        let new_id = moved["id"]
+            .as_str()
+            .ok_or_else(|| PebbleError::Network("Move response missing id field".into()))?
+            .to_string();
+        Ok(new_id)
     }
 }
 
@@ -751,12 +762,14 @@ impl OutlookProvider {
     }
 
     /// Move a message to the Deleted Items folder (trash) via Graph API.
-    pub async fn trash_message(&self, remote_id: &str) -> Result<()> {
+    /// Returns the new remote message ID assigned by Graph after the move.
+    pub async fn trash_message(&self, remote_id: &str) -> Result<String> {
         self.move_message(remote_id, "deleteditems").await
     }
 
     /// Move a message from trash back to inbox via Graph API.
-    pub async fn restore_message(&self, remote_id: &str) -> Result<()> {
+    /// Returns the new remote message ID assigned by Graph after the move.
+    pub async fn restore_message(&self, remote_id: &str) -> Result<String> {
         self.move_message(remote_id, "inbox").await
     }
 

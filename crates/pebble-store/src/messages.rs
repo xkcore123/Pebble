@@ -565,6 +565,17 @@ impl Store {
         })
     }
 
+    pub fn update_remote_id(&self, message_id: &str, new_remote_id: &str) -> Result<()> {
+        self.with_write(|conn| {
+            let now = pebble_core::now_timestamp();
+            conn.execute(
+                "UPDATE messages SET remote_id = ?1, updated_at = ?2 WHERE id = ?3",
+                params![new_remote_id, now, message_id],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn add_message_to_folder(&self, message_id: &str, folder_id: &str) -> Result<()> {
         self.with_write(|conn| {
             let now = pebble_core::now_timestamp();
