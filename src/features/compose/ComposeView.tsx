@@ -682,6 +682,25 @@ function ComposeViewInner({ accounts }: { accounts: Account[] }) {
                 setSendError(t("compose.attachmentStageError", "Failed to attach file"));
               }
             }}
+            onPaste={async (e) => {
+              const items = e.clipboardData?.items;
+              if (!items) return;
+              const imageFiles: File[] = [];
+              for (const item of Array.from(items)) {
+                if (item.type.startsWith("image/")) {
+                  const file = item.getAsFile();
+                  if (file) imageFiles.push(file);
+                }
+              }
+              if (!imageFiles.length) return;
+              e.preventDefault();
+              try {
+                await stageAttachmentFiles(imageFiles);
+              } catch (err) {
+                console.warn("Failed to stage pasted image:", err);
+                setSendError(t("compose.attachmentStageError", "Failed to attach file"));
+              }
+            }}
           >
             <div className="compose-editor-surface">
               {editorMode === "rich" ? (
