@@ -6,6 +6,7 @@ import {
   testTranslateConnection,
 } from "../../lib/api";
 import { useToastStore } from "@/stores/toast.store";
+import { extractErrorMessage } from "../../lib/extractErrorMessage";
 
 type ProviderType = "deeplx" | "deepl" | "generic_api" | "llm";
 
@@ -157,7 +158,7 @@ export default function TranslateTab() {
       setStatusMsg(t("translate.configSaved"));
       setStatusType("success");
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
+      const errMsg = extractErrorMessage(err);
       setStatusMsg(t("translate.saveFailed", { error: errMsg }));
       setStatusType("error");
       useToastStore.getState().addToast({
@@ -178,7 +179,7 @@ export default function TranslateTab() {
       setStatusMsg(t("translate.connectionOk", { result }));
       setStatusType("success");
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
+      const errMsg = extractErrorMessage(err);
       setStatusMsg(t("translate.testFailed", { error: errMsg }));
       setStatusType("error");
       useToastStore.getState().addToast({
