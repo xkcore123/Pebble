@@ -568,10 +568,15 @@ impl Store {
     pub fn update_remote_id(&self, message_id: &str, new_remote_id: &str) -> Result<()> {
         self.with_write(|conn| {
             let now = pebble_core::now_timestamp();
-            conn.execute(
+            let changed = conn.execute(
                 "UPDATE messages SET remote_id = ?1, updated_at = ?2 WHERE id = ?3",
                 params![new_remote_id, now, message_id],
             )?;
+            if changed == 0 {
+                return Err(PebbleError::Internal(format!(
+                    "Message not found for remote_id update: {message_id}"
+                )));
+            }
             Ok(())
         })
     }
@@ -1404,6 +1409,19 @@ mod remote_id_scope_tests {
 
         assert!(inbox_matches.contains("123"));
         assert!(!sent_matches.contains("123"));
+    }
+
+    #[test]
+    fn update_remote_id_reports_missing_message() {
+        let store = Store::open_in_memory().unwrap();
+
+        let err = store
+            .update_remote_id("missing-message", "new-remote-id")
+            .expect_err("updating a missing message must fail");
+
+        assert!(
+            matches!(err, PebbleError::Internal(message) if message.contains("missing-message"))
+        );
     }
 
     #[test]

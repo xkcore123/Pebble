@@ -68,6 +68,16 @@ fn batch_local_commit_ids(
         .collect()
 }
 
+fn record_remote_success_after_remote_id_update(
+    message_id: &str,
+    update_result: std::result::Result<(), PebbleError>,
+    remote_succeeded_ids: &mut Vec<String>,
+) -> std::result::Result<(), PebbleError> {
+    update_result?;
+    remote_succeeded_ids.push(message_id.to_string());
+    Ok(())
+}
+
 /// Shared preamble for every batch_* command: enforce the 1000-id cap, then
 /// resolve the provider groupings off the Tokio runtime. Returns `Ok(None)`
 /// for an empty input so the caller can short-circuit with a zero count.
@@ -152,9 +162,16 @@ pub async fn batch_archive(
                             for msg in messages {
                                 match provider.move_message(&msg.remote_id, &af.remote_id).await {
                                     Ok(new_remote_id) => {
-                                        let _ =
-                                            state.store.update_remote_id(&msg.id, &new_remote_id);
-                                        remote_succeeded.push(msg.id.clone());
+                                        if let Err(e) = record_remote_success_after_remote_id_update(
+                                            &msg.id,
+                                            state.store.update_remote_id(&msg.id, &new_remote_id),
+                                            &mut remote_succeeded,
+                                        ) {
+                                            warn!(
+                                                "Outlook batch archive applied remotely but failed to store new remote_id for {}: {e}",
+                                                msg.id
+                                            );
+                                        }
                                     }
                                     Err(e) => {
                                         warn!("Outlook batch archive failed for {}: {e}", msg.id);
@@ -339,8 +356,16 @@ pub async fn batch_delete(
                         for msg in messages {
                             match provider.trash_message(&msg.remote_id).await {
                                 Ok(new_remote_id) => {
-                                    let _ = state.store.update_remote_id(&msg.id, &new_remote_id);
-                                    deleted_ids.push(msg.id.clone());
+                                    if let Err(e) = record_remote_success_after_remote_id_update(
+                                        &msg.id,
+                                        state.store.update_remote_id(&msg.id, &new_remote_id),
+                                        &mut deleted_ids,
+                                    ) {
+                                        warn!(
+                                            "Outlook batch delete applied remotely but failed to store new remote_id for {}: {e}",
+                                            msg.id
+                                        );
+                                    }
                                 }
                                 Err(e) => {
                                     warn!("Outlook batch delete failed for {}: {e}", msg.id);
@@ -770,7 +795,8 @@ pub async fn batch_star(
 
 #[cfg(test)]
 mod tests {
-    use super::batch_local_commit_ids;
+    use super::{batch_local_commit_ids, record_remote_success_after_remote_id_update};
+    use pebble_core::PebbleError;
 
     #[test]
     fn batch_local_commit_ids_include_remote_successes_and_queued_connection_failures_in_request_order(
@@ -794,5 +820,24 @@ mod tests {
         let requested = vec!["message-1".to_string(), "message-2".to_string()];
 
         assert!(batch_local_commit_ids(&requested, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn remote_success_after_id_update_requires_successful_persist() {
+        let mut remote_succeeded = Vec::new();
+
+        record_remote_success_after_remote_id_update("message-1", Ok(()), &mut remote_succeeded)
+            .unwrap();
+        let err = record_remote_success_after_remote_id_update(
+            "message-2",
+            Err(PebbleError::Internal("db unavailable".to_string())),
+            &mut remote_succeeded,
+        )
+        .expect_err("failed remote id persistence must not be counted as remote success");
+
+        assert!(
+            matches!(err, PebbleError::Internal(message) if message.contains("db unavailable"))
+        );
+        assert_eq!(remote_succeeded, vec!["message-1".to_string()]);
     }
 }
