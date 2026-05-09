@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Updated Outlook local remote IDs after Graph API folder moves, including batch archive and delete paths, so follow-up actions no longer use stale message IDs.
 - Enabled TLS 1.2 support for IMAP and SMTP connections to improve compatibility with older mail servers.
+- Treated rustls unexpected EOF and missing TLS `close_notify` disconnects during IMAP polling as retryable connection interruptions.
 - Improved IMAP compatibility for Tencent enterprise mail and other Coremail-based providers that require IMAP ID before login.
 - Displayed the actual translate settings save and test error instead of a generic object string.
 - Prevented modal dialogs from closing when text selection drags finish outside the window.
