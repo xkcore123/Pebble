@@ -371,19 +371,18 @@ async fn replay_remote_restore(
             }
         }
         ProviderType::Outlook => {
-            let new_remote_id = if let Some(target_remote_id) =
-                string_field(payload, "target_folder_remote_id")
-            {
-                connect_outlook(state, &message.account_id)
-                    .await?
-                    .move_message(&message.remote_id, &target_remote_id)
-                    .await?
-            } else {
-                connect_outlook(state, &message.account_id)
-                    .await?
-                    .restore_message(&message.remote_id)
-                    .await?
-            };
+            let new_remote_id =
+                if let Some(target_remote_id) = string_field(payload, "target_folder_remote_id") {
+                    connect_outlook(state, &message.account_id)
+                        .await?
+                        .move_message(&message.remote_id, &target_remote_id)
+                        .await?
+                } else {
+                    connect_outlook(state, &message.account_id)
+                        .await?
+                        .restore_message(&message.remote_id)
+                        .await?
+                };
             state.store.update_remote_id(&message.id, &new_remote_id)?;
             Ok(())
         }

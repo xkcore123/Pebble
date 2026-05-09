@@ -1171,7 +1171,10 @@ impl SyncWorker {
                             );
                             self.base.emit_error(
                                 "poll",
-                                &format!("Poll retry failed for folder {}: {}", folder.name, retry_error),
+                                &format!(
+                                    "Poll retry failed for folder {}: {}",
+                                    folder.name, retry_error
+                                ),
                             );
                             if is_retryable_imap_connection_error(&retry_error) {
                                 return Some(retry_error);

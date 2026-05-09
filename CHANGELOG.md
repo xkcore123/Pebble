@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-05-09
+
+### Added
+
+- Added image paste support in the compose editor so clipboard images can be staged and sent as attachments.
+
+### Fixed
+
+- Updated Outlook local remote IDs after Graph API folder moves, including batch archive and delete paths, so follow-up actions no longer use stale message IDs.
+- Enabled TLS 1.2 support for IMAP and SMTP connections to improve compatibility with older mail servers.
+- Improved IMAP compatibility for Tencent enterprise mail and other Coremail-based providers that require IMAP ID before login.
+- Displayed the actual translate settings save and test error instead of a generic object string.
+- Prevented modal dialogs from closing when text selection drags finish outside the window.
+
 ## [0.0.6] - 2026-05-05
 
 ### Added
@@ -154,7 +168,8 @@ This release includes:
 - Windows installers are not code-signed yet, so Windows SmartScreen may show a warning.
 - Outlook support is still experimental and depends on Microsoft Graph permissions configured by the user.
 
-[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.0.6...HEAD
+[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.0.7...HEAD
+[0.0.7]: https://github.com/QingJ01/Pebble/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/QingJ01/Pebble/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/QingJ01/Pebble/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/QingJ01/Pebble/compare/v0.0.3...v0.0.4
