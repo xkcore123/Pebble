@@ -25,7 +25,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-build = { version = "2", features = [] }
 async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = "0.26"
-rustls = { version = "0.23", features = ["aws_lc_rs"] }
+rustls = { version = "0.23", features = ["aws_lc_rs", "tls12"] }
 webpki-roots = "0.26"
 mail-parser = "0.9"
 tantivy = "0.22"
