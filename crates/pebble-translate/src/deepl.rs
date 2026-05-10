@@ -4,6 +4,7 @@ use crate::deeplx::build_segments;
 use crate::types::TranslateResult;
 
 pub async fn translate(
+    client: &reqwest::Client,
     api_key: &str,
     use_free_api: bool,
     text: &str,
@@ -16,7 +17,6 @@ pub async fn translate(
         "https://api.deepl.com/v2/translate"
     };
 
-    let client = reqwest::Client::new();
     let from_upper = from.to_uppercase();
     let to_upper = to.to_uppercase();
 

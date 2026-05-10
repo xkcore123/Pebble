@@ -4,6 +4,7 @@ use crate::deeplx::build_segments;
 use crate::types::{LLMMode, TranslateResult};
 
 pub async fn translate(
+    client: &reqwest::Client,
     endpoint: &str,
     api_key: &str,
     model: &str,
@@ -12,8 +13,6 @@ pub async fn translate(
     from: &str,
     to: &str,
 ) -> Result<TranslateResult> {
-    let client = reqwest::Client::new();
-
     let system_prompt = format!(
         "You are a professional translator. Translate the following text from {from} to {to}. \
          Output ONLY the translation, nothing else. Preserve formatting and line breaks."

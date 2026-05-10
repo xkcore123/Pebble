@@ -5,6 +5,7 @@ use crate::types::TranslateResult;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn translate(
+    client: &reqwest::Client,
     endpoint: &str,
     api_key: Option<&str>,
     source_lang_param: &str,
@@ -15,7 +16,6 @@ pub async fn translate(
     from: &str,
     to: &str,
 ) -> Result<TranslateResult> {
-    let client = reqwest::Client::new();
     let mut body_map = serde_json::Map::new();
     body_map.insert(
         text_param.to_string(),

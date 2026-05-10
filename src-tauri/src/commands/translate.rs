@@ -1,3 +1,4 @@
+use super::network::get_global_proxy_raw;
 use crate::state::AppState;
 use pebble_core::{now_timestamp, PebbleError, TranslateConfig};
 use pebble_translate::types::{TranslateProviderConfig, TranslateResult};
@@ -69,7 +70,16 @@ pub async fn translate_text(
 
     validate_provider_config(&provider_config)?;
 
-    TranslateService::translate(&provider_config, &text, &from_lang, &to_lang).await
+    let proxy = get_global_proxy_raw(&state.crypto, &state.store)?;
+
+    TranslateService::translate_with_proxy(
+        &provider_config,
+        proxy.as_ref(),
+        &text,
+        &from_lang,
+        &to_lang,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -150,13 +160,24 @@ fn validate_translate_url(url: &str) -> std::result::Result<(), PebbleError> {
 }
 
 #[tauri::command]
-pub async fn test_translate_connection(config: String) -> std::result::Result<String, PebbleError> {
+pub async fn test_translate_connection(
+    state: State<'_, AppState>,
+    config: String,
+) -> std::result::Result<String, PebbleError> {
     let provider_config: TranslateProviderConfig = serde_json::from_str(&config)
         .map_err(|e| PebbleError::Translate(format!("Invalid config: {e}")))?;
 
     // Validate endpoint URLs before making any requests
     validate_provider_config(&provider_config)?;
 
-    let result = TranslateService::translate(&provider_config, "Hello", "en", "zh").await?;
+    let proxy = get_global_proxy_raw(&state.crypto, &state.store)?;
+    let result = TranslateService::translate_with_proxy(
+        &provider_config,
+        proxy.as_ref(),
+        "Hello",
+        "en",
+        "zh",
+    )
+    .await?;
     Ok(result.translated)
 }

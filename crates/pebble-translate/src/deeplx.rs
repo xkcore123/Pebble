@@ -3,12 +3,12 @@ use pebble_core::{PebbleError, Result};
 use crate::types::{BilingualSegment, TranslateResult};
 
 pub async fn translate(
+    client: &reqwest::Client,
     endpoint: &str,
     text: &str,
     from: &str,
     to: &str,
 ) -> Result<TranslateResult> {
-    let client = reqwest::Client::new();
     let body = serde_json::json!({
         "text": text,
         "source_lang": from.to_uppercase(),

@@ -206,7 +206,7 @@ export default function ProxyTab() {
         {t("settings.globalProxy", "Global Proxy")}
       </h3>
       <p style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginBottom: "12px", marginTop: 0 }}>
-        {t("settings.globalProxyDesc", "Used by OAuth, Gmail/Outlook API requests, IMAP, and SMTP when an account does not define its own SOCKS5 proxy.")}
+        {t("settings.globalProxyDesc", "Used by translation, OAuth, Gmail/Outlook API requests, IMAP, and SMTP when an account does not define its own SOCKS5 proxy.")}
       </p>
       <div
         role="group"

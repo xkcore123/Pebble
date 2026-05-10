@@ -180,7 +180,7 @@
     "folderCounts": "文件夹计数",
     "showUnreadCount": "在侧边栏显示未读数徽章",
     "globalProxy": "全局代理",
-    "globalProxyDesc": "当账号未单独设置 SOCKS5 代理时，用于 OAuth、Gmail/Outlook API 请求、IMAP 和 SMTP。",
+    "globalProxyDesc": "当账号未单独设置 SOCKS5 代理时，用于翻译、OAuth、Gmail/Outlook API 请求、IMAP 和 SMTP。",
     "globalProxyHost": "SOCKS5 代理",
     "globalProxyPort": "端口",
     "globalProxySaved": "全局代理已保存",

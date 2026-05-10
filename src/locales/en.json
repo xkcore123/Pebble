@@ -180,7 +180,7 @@
     "folderCounts": "Folder Counts",
     "showUnreadCount": "Show unread count badges in sidebar",
     "globalProxy": "Global Proxy",
-    "globalProxyDesc": "Used by OAuth, Gmail/Outlook API requests, IMAP, and SMTP when an account does not define its own SOCKS5 proxy.",
+    "globalProxyDesc": "Used by translation, OAuth, Gmail/Outlook API requests, IMAP, and SMTP when an account does not define its own SOCKS5 proxy.",
     "globalProxyHost": "SOCKS5 Proxy",
     "globalProxyPort": "Port",
     "globalProxySaved": "Global proxy saved",
