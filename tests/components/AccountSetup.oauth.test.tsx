@@ -107,4 +107,26 @@ describe("AccountSetup OAuth", () => {
       expect(completeOAuthFlow).toHaveBeenCalledWith("gmail", "", "", "127.0.0.1", 7890);
     });
   });
+
+  it("keeps the add-account dialog open when clicking the backdrop", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+    const onClose = vi.fn();
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AccountSetup onClose={onClose} />
+      </QueryClientProvider>,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Add Email Account" });
+    fireEvent.mouseDown(dialog);
+    fireEvent.click(dialog);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Add Email Account" })).toBeTruthy();
+  });
 });

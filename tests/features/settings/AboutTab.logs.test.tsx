@@ -54,4 +54,19 @@ describe("AboutTab diagnostics", () => {
     expect(screen.getByText(/latest line/)).toBeTruthy();
     expect(screen.getByText(/pebble\.log$/)).toBeTruthy();
   });
+
+  it("keeps the diagnostic log open when clicking the backdrop", async () => {
+    render(<AboutTab />);
+
+    const iconButton = screen.getByRole("button", { name: "Open diagnostic log" });
+    for (let i = 0; i < 5; i += 1) {
+      fireEvent.click(iconButton);
+    }
+
+    const dialog = await screen.findByRole("dialog", { name: "Diagnostic log" });
+    fireEvent.mouseDown(dialog);
+    fireEvent.click(dialog);
+
+    expect(screen.queryByRole("dialog", { name: "Diagnostic log" })).not.toBeNull();
+  });
 });

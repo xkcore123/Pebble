@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -76,6 +76,25 @@ fn build_sync_label_ids(folders: &[Folder]) -> Vec<String> {
 
 fn can_advance_gmail_cursor(failure_count: usize) -> bool {
     failure_count == 0
+}
+
+fn filter_deleted_history_additions(added_ids: Vec<String>, deleted_ids: &[String]) -> Vec<String> {
+    if deleted_ids.is_empty() {
+        return added_ids;
+    }
+
+    let deleted: HashSet<&str> = deleted_ids.iter().map(String::as_str).collect();
+    added_ids
+        .into_iter()
+        .filter(|id| !deleted.contains(id.as_str()))
+        .collect()
+}
+
+fn should_count_gmail_history_fetch_failure(error: &PebbleError) -> bool {
+    !matches!(
+        error,
+        PebbleError::Network(message) if message.contains("status 404")
+    )
 }
 
 fn should_notify_gmail_startup_fetch(stored_cursor: Option<&str>) -> bool {
@@ -748,6 +767,8 @@ impl GmailSyncWorker {
             }
         }
 
+        let new_ids = filter_deleted_history_additions(new_ids, &deleted_ids);
+
         // Fetch new messages concurrently, then collect refs and store.
         if !new_ids.is_empty() {
             let existing = match self
@@ -798,8 +819,15 @@ impl GmailSyncWorker {
                     match result {
                         Ok(fetched) => fetched_messages.push(fetched),
                         Err(e) => {
-                            failure_count += 1;
-                            warn!("Failed to fetch history message {}: {}", gmail_id, e);
+                            if should_count_gmail_history_fetch_failure(&e) {
+                                failure_count += 1;
+                                warn!("Failed to fetch history message {}: {}", gmail_id, e);
+                            } else {
+                                debug!(
+                                    "Skipping stale Gmail history message {} after fetch returned not found",
+                                    gmail_id
+                                );
+                            }
                         }
                     }
                 }
@@ -1077,6 +1105,39 @@ mod tests {
     #[test]
     fn gmail_cursor_advances_without_failures() {
         assert!(can_advance_gmail_cursor(0));
+    }
+
+    #[test]
+    fn gmail_history_additions_exclude_messages_deleted_in_same_batch() {
+        let added = vec![
+            "deleted-message".to_string(),
+            "surviving-message".to_string(),
+        ];
+        let deleted = vec!["deleted-message".to_string()];
+
+        assert_eq!(
+            filter_deleted_history_additions(added, &deleted),
+            vec!["surviving-message".to_string()]
+        );
+    }
+
+    #[test]
+    fn gmail_history_fetch_404_does_not_count_as_cursor_blocking_failure() {
+        let error = PebbleError::Network(
+            "Failed to fetch message gone-message (status 404 Not Found): {}".to_string(),
+        );
+
+        assert!(!should_count_gmail_history_fetch_failure(&error));
+    }
+
+    #[test]
+    fn gmail_history_fetch_non_404_counts_as_cursor_blocking_failure() {
+        let error = PebbleError::Network(
+            "Failed to fetch message rate-limited-message (status 429 Too Many Requests): {}"
+                .to_string(),
+        );
+
+        assert!(should_count_gmail_history_fetch_failure(&error));
     }
 
     #[test]

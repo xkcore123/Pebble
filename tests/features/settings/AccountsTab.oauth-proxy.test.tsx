@@ -217,4 +217,16 @@ describe("AccountsTab OAuth proxy", () => {
       );
     });
   });
+
+  it("keeps the edit-account dialog open when clicking the backdrop", async () => {
+    render(<AccountsTab />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit account" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Edit Account" });
+    fireEvent.mouseDown(dialog);
+    fireEvent.click(dialog);
+
+    expect(screen.queryByRole("dialog", { name: "Edit Account" })).not.toBeNull();
+  });
 });
