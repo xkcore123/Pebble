@@ -11,6 +11,15 @@ export type { Language } from "@/lib/language";
 export type NetworkStatus = "online" | "offline";
 export type RealtimeMode = "realtime" | "polling" | "manual" | "backoff" | "offline" | "auth_required" | "error";
 export type RealtimePreference = "realtime" | "balanced" | "battery" | "manual";
+export type BackgroundImageFit = "cover" | "contain" | "repeat";
+
+export interface BackgroundImageSettings {
+  path: string;
+  filename: string;
+  fit: BackgroundImageFit;
+  opacity: number;
+  updatedAt: number;
+}
 
 export interface RealtimeStatus {
   account_id: string;
@@ -25,12 +34,54 @@ const REALTIME_PREFERENCE_KEY = "pebble-realtime-mode";
 const REALTIME_PREFERENCES = new Set<RealtimePreference>(["realtime", "balanced", "battery", "manual"]);
 const NOTIFICATIONS_KEY = "pebble-notifications-enabled";
 const KEEP_RUNNING_BACKGROUND_KEY = "pebble-keep-running-background";
+export const BACKGROUND_IMAGE_STORAGE_KEY = "pebble-background-image-settings";
+const BACKGROUND_IMAGE_FITS = new Set<BackgroundImageFit>(["cover", "contain", "repeat"]);
+const DEFAULT_BACKGROUND_IMAGE_FIT: BackgroundImageFit = "cover";
+const DEFAULT_BACKGROUND_IMAGE_OPACITY = 0.35;
+const MIN_BACKGROUND_IMAGE_OPACITY = 0.05;
+const MAX_BACKGROUND_IMAGE_OPACITY = 1;
 
 function readRealtimePreference(): RealtimePreference {
   const stored = localStorage.getItem(REALTIME_PREFERENCE_KEY);
   return REALTIME_PREFERENCES.has(stored as RealtimePreference)
     ? (stored as RealtimePreference)
     : "realtime";
+}
+
+function clampBackgroundImageOpacity(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_BACKGROUND_IMAGE_OPACITY;
+  return Math.min(MAX_BACKGROUND_IMAGE_OPACITY, Math.max(MIN_BACKGROUND_IMAGE_OPACITY, value));
+}
+
+function readBackgroundImageSettings(): BackgroundImageSettings | null {
+  const stored = localStorage.getItem(BACKGROUND_IMAGE_STORAGE_KEY);
+  if (!stored) return null;
+  try {
+    const parsed = JSON.parse(stored) as Partial<BackgroundImageSettings>;
+    if (!parsed || typeof parsed.path !== "string" || typeof parsed.filename !== "string") {
+      return null;
+    }
+    const fit = BACKGROUND_IMAGE_FITS.has(parsed.fit as BackgroundImageFit)
+      ? parsed.fit as BackgroundImageFit
+      : DEFAULT_BACKGROUND_IMAGE_FIT;
+    return {
+      path: parsed.path,
+      filename: parsed.filename,
+      fit,
+      opacity: clampBackgroundImageOpacity(Number(parsed.opacity ?? DEFAULT_BACKGROUND_IMAGE_OPACITY)),
+      updatedAt: Number.isFinite(Number(parsed.updatedAt)) ? Number(parsed.updatedAt) : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistBackgroundImageSettings(settings: BackgroundImageSettings | null) {
+  if (!settings) {
+    localStorage.removeItem(BACKGROUND_IMAGE_STORAGE_KEY);
+    return;
+  }
+  localStorage.setItem(BACKGROUND_IMAGE_STORAGE_KEY, JSON.stringify(settings));
 }
 
 export function readNotificationsEnabledPreference(): boolean {
@@ -60,6 +111,7 @@ const initialRealtimeMode = readRealtimePreference();
 const initialNotificationsEnabled = readNotificationsEnabledPreference();
 const initialKeepRunningInBackground = readKeepRunningInBackgroundPreference();
 const initialLanguage = getInitialLanguage();
+const initialBackgroundImage = readBackgroundImageSettings();
 
 /** Resolve "system" theme to an actual "dark" | "light" value. */
 function resolveTheme(theme: Theme): "dark" | "light" {
@@ -78,6 +130,7 @@ interface UIState {
   sidebarCollapsed: boolean;
   activeView: ActiveView;
   theme: Theme;
+  backgroundImage: BackgroundImageSettings | null;
   language: Language;
   syncStatus: "idle" | "syncing" | "error";
   networkStatus: NetworkStatus;
@@ -93,6 +146,10 @@ interface UIState {
   setActiveView: (view: ActiveView) => void;
   openMessageInInbox: (messageId: string) => void;
   setTheme: (theme: Theme) => void;
+  setBackgroundImage: (image: { path: string; filename: string }) => void;
+  setBackgroundImageFit: (fit: BackgroundImageFit) => void;
+  setBackgroundImageOpacity: (opacity: number) => void;
+  clearBackgroundImage: () => void;
   setLanguage: (lang: Language) => void;
   setSyncStatus: (status: "idle" | "syncing" | "error") => void;
   setNetworkStatus: (status: NetworkStatus) => void;
@@ -115,6 +172,7 @@ export const useUIStore = create<UIState>((set) => ({
   sidebarCollapsed: false,
   activeView: "inbox",
   theme: (localStorage.getItem("pebble-theme") as Theme) || "light",
+  backgroundImage: initialBackgroundImage,
   language: initialLanguage,
   syncStatus: "idle",
   networkStatus: "online",
@@ -173,6 +231,41 @@ export const useUIStore = create<UIState>((set) => ({
     localStorage.setItem("pebble-theme", theme);
     applyThemeToDom(theme);
     set({ theme });
+  },
+  setBackgroundImage: (image) => {
+    const current = useUIStore.getState().backgroundImage;
+    const next: BackgroundImageSettings = {
+      path: image.path,
+      filename: image.filename,
+      fit: current?.fit ?? DEFAULT_BACKGROUND_IMAGE_FIT,
+      opacity: current?.opacity ?? DEFAULT_BACKGROUND_IMAGE_OPACITY,
+      updatedAt: Date.now(),
+    };
+    persistBackgroundImageSettings(next);
+    set({ backgroundImage: next });
+  },
+  setBackgroundImageFit: (fit) => {
+    if (!BACKGROUND_IMAGE_FITS.has(fit)) return;
+    const current = useUIStore.getState().backgroundImage;
+    if (!current) return;
+    const next = { ...current, fit, updatedAt: Date.now() };
+    persistBackgroundImageSettings(next);
+    set({ backgroundImage: next });
+  },
+  setBackgroundImageOpacity: (opacity) => {
+    const current = useUIStore.getState().backgroundImage;
+    if (!current) return;
+    const next = {
+      ...current,
+      opacity: clampBackgroundImageOpacity(opacity),
+      updatedAt: Date.now(),
+    };
+    persistBackgroundImageSettings(next);
+    set({ backgroundImage: next });
+  },
+  clearBackgroundImage: () => {
+    persistBackgroundImageSettings(null);
+    set({ backgroundImage: null });
   },
   setLanguage: (lang) => {
     i18n.changeLanguage(lang);

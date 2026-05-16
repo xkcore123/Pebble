@@ -14,6 +14,7 @@ export type {
   EmailAddress,
   Folder,
   HttpProxyConfig,
+  ImportedBackgroundImage,
   KanbanCard,
   KanbanColumnType,
   KnownContact,

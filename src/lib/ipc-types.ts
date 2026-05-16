@@ -112,6 +112,13 @@ export interface AppLogSnapshot {
   truncated: boolean;
 }
 
+/** @rust src-tauri/src/commands/appearance.rs -> ImportedBackgroundImage */
+export interface ImportedBackgroundImage {
+  path: string;
+  filename: string;
+  size: number;
+}
+
 /** @rust src-tauri/src/commands/notifications.rs -> NotificationStatus */
 export interface NotificationStatus {
   enabled: boolean;

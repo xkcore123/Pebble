@@ -77,7 +77,6 @@ function MessageItem({ message, labels = [], isSelected, onClick, onToggleStar, 
       aria-selected={isSelected}
       style={{
         position: "relative",
-        backgroundColor: isSelected ? "var(--color-sidebar-active)" : undefined,
         color: "var(--color-text-primary)",
         fontWeight,
         cursor: "pointer",

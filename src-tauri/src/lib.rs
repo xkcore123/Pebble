@@ -444,6 +444,8 @@ pub fn run() {
             commands::health::check_for_update,
             commands::health::open_external_url,
             commands::diagnostics::read_app_log,
+            commands::appearance::import_background_image,
+            commands::appearance::delete_background_image,
             commands::accounts::add_account,
             commands::accounts::get_account_proxy,
             commands::accounts::get_account_proxy_setting,

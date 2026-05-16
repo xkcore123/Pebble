@@ -22,6 +22,7 @@ import { useNotificationOpenNavigation } from "./useNotificationOpenNavigation";
 import { useCloseToBackground } from "./useCloseToBackground";
 import { useTrayI18n } from "./useTrayI18n";
 import { useMailtoOpen } from "./useMailtoOpen";
+import AppBackground from "./AppBackground";
 
 const loadSettingsView = () => import("../features/settings/SettingsView");
 const loadComposeView = () => import("../features/compose/ComposeView");
@@ -57,6 +58,7 @@ export default function Layout() {
   const composeKey = useComposeStore((s) => s.composeKey);
   const setActiveView = useUIStore((s) => s.setActiveView);
   const theme = useUIStore((s) => s.theme);
+  const backgroundImage = useUIStore((s) => s.backgroundImage);
   const notificationsEnabled = useUIStore((s) => s.notificationsEnabled);
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -118,9 +120,12 @@ export default function Layout() {
   }, [theme]);
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden">
+    <div
+      className={`app-shell flex flex-col h-screen overflow-hidden${backgroundImage ? " app-shell--with-background" : ""}`}
+    >
+      <AppBackground image={backgroundImage} />
       <TitleBar />
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 app-shell-content">
         <Sidebar />
         <main className="flex-1 min-w-0 overflow-auto scroll-region app-main-scroll" style={{ position: "relative" }}>
           <OfflineBanner />

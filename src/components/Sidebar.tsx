@@ -73,7 +73,6 @@ export default function Sidebar() {
   );
   const { data: folders = EMPTY_FOLDERS, isFetched: foldersFetched } = useFoldersForAccountsQuery(folderAccountIds);
   const { data: unreadCounts = {} } = useFolderUnreadCountsForAccounts(folderAccountIds);
-
   const ROLE_LABELS: Record<string, string> = {
     inbox: t("sidebar.inbox"),
     sent: t("sidebar.sent"),
@@ -207,7 +206,7 @@ export default function Sidebar() {
 
       {/* Account switcher */}
       {!sidebarCollapsed && accounts.length > 1 && (
-        <div style={{ padding: "0 14px 8px 6px" }}>
+        <div style={{ padding: "0 10px 8px" }}>
           <select
             aria-label={t("settings.emailAccounts", "Email Accounts")}
             value={activeAccountId || ALL_ACCOUNTS_SELECT_VALUE}
@@ -217,11 +216,11 @@ export default function Sidebar() {
             }}
             style={{
               width: "100%",
-              padding: "4px 6px",
-              fontSize: "12px",
-              borderRadius: "4px",
-              border: "1px solid var(--color-border)",
-              backgroundColor: "var(--color-bg)",
+              padding: "6px 10px",
+              fontSize: "13px",
+              borderRadius: "8px",
+              border: "1.5px solid color-mix(in srgb, var(--color-accent) 50%, var(--color-border))",
+              backgroundColor: "color-mix(in srgb, var(--color-accent) 6%, transparent)",
               color: "var(--color-text-primary)",
               cursor: "pointer",
             }}

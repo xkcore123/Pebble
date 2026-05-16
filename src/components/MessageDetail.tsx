@@ -225,11 +225,11 @@ export default function MessageDetail({ messageId, onBack, folderRole }: Props) 
 
   return (
     <div
+      className="message-detail-container"
       style={{
         display: "flex",
         flexDirection: "column",
         height: "100%",
-        backgroundColor: "var(--color-bg)",
       }}
     >
       {/* Header */}

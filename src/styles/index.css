@@ -48,6 +48,49 @@ html, body, #root {
   background: var(--color-main-bg);
 }
 
+.app-shell {
+  position: relative;
+  background: var(--color-main-bg);
+  isolation: isolate;
+}
+
+.app-background-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-color: var(--color-main-bg);
+}
+
+.app-shell > :not(.app-background-layer) {
+  position: relative;
+  z-index: 1;
+}
+
+.app-shell--with-background {
+  background: transparent;
+}
+
+.app-shell--with-background > [data-tauri-drag-region] {
+  background-color: color-mix(in srgb, var(--color-titlebar-bg) 78%, transparent) !important;
+  backdrop-filter: blur(18px);
+}
+
+.app-shell--with-background .app-shell-content > aside {
+  background-color: color-mix(in srgb, var(--color-sidebar-bg) 76%, transparent) !important;
+  backdrop-filter: blur(18px);
+}
+
+.app-shell--with-background > footer {
+  background-color: color-mix(in srgb, var(--color-statusbar-bg) 76%, transparent) !important;
+  backdrop-filter: blur(18px);
+}
+
+.app-shell--with-background .app-main-scroll {
+  background-color: color-mix(in srgb, var(--color-main-bg) 68%, transparent);
+  backdrop-filter: blur(16px) saturate(1.02);
+}
+
 input,
 textarea,
 select,
@@ -196,9 +239,22 @@ option {
   color: var(--color-text-secondary);
 }
 
+.message-detail-container {
+  background-color: var(--color-bg);
+}
+
+.app-shell--with-background .message-detail-container {
+  background-color: transparent;
+}
+
 .message-list-row,
 .thread-list-row {
   background: transparent;
+}
+
+.message-list-row[aria-selected="true"],
+.thread-list-row[aria-selected="true"] {
+  background: var(--color-sidebar-active);
 }
 
 .message-list-row[aria-selected="false"]:hover,
@@ -213,6 +269,11 @@ option {
 .thread-list-row--unread[aria-selected="false"]:hover,
 .thread-list-row--unread[aria-selected="false"]:focus {
   background: var(--color-bg-hover);
+}
+
+.app-shell--with-background .message-list-row[aria-selected="true"],
+.app-shell--with-background .thread-list-row[aria-selected="true"] {
+  background: color-mix(in srgb, var(--color-sidebar-active) 60%, transparent);
 }
 
 /* Staggered fade-in for list items */
@@ -621,37 +682,44 @@ textarea:focus-visible {
 .search-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: 10px;
+  padding: 12px 18px;
   border-bottom: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-bg) 96%, var(--color-bg-secondary));
+  background: color-mix(in srgb, var(--color-bg) 94%, var(--color-bg-secondary));
 }
 
 .search-input-shell {
   flex: 1;
   min-width: 0;
-  height: 34px;
+  height: 42px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
+  gap: 10px;
+  padding: 0 14px;
   border: 1px solid var(--color-border);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--color-bg);
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
   transition: border-color 0.14s ease, box-shadow 0.14s ease, background-color 0.14s ease;
 }
 
 .search-input-shell:focus-within {
   border-color: color-mix(in srgb, var(--color-accent) 46%, var(--color-border));
-  box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--color-accent) 16%, transparent),
-    0 1px 0 rgba(0, 0, 0, 0.02);
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--color-accent) 14%, transparent);
 }
 
 .search-input-shell svg {
   flex-shrink: 0;
-  color: var(--color-text-secondary);
+  color: color-mix(in srgb, var(--color-text-secondary) 86%, var(--color-text-primary));
+}
+
+.app-shell--with-background .search-toolbar {
+  border-bottom-color: color-mix(in srgb, var(--color-border) 60%, transparent);
+  background: color-mix(in srgb, var(--color-bg) 12%, transparent);
+}
+
+.app-shell--with-background .search-input-shell {
+  border-color: color-mix(in srgb, var(--color-border) 50%, transparent);
+  background: color-mix(in srgb, var(--color-bg) 18%, transparent);
 }
 
 .search-input {
@@ -682,6 +750,12 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--color-bg) 96%, var(--color-bg-secondary));
 }
 
+.app-shell--with-background .inbox-toolbar-row {
+  border-bottom-color: color-mix(in srgb, var(--color-border) 60%, transparent);
+  background: color-mix(in srgb, var(--color-bg) 12%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--color-border) 50%, transparent);
+}
+
 .inbox-toolbar-search {
   flex: 1 1 auto;
   min-width: 0;
@@ -690,6 +764,11 @@ textarea:focus-visible {
 .inbox-toolbar-search .search-toolbar {
   border-bottom: 0;
   background: transparent;
+}
+
+.app-shell--with-background .inbox-toolbar-search .search-toolbar {
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .inbox-toolbar-button {

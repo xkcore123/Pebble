@@ -7,6 +7,15 @@ import { useUIStore } from "../../src/stores/ui.store";
 import type { Folder } from "../../src/lib/api";
 
 const mocks = vi.hoisted(() => ({
+  accounts: [{
+    id: "account-1",
+    email: "user@example.com",
+    display_name: "User",
+    provider: "imap",
+    color: null,
+    created_at: 1,
+    updated_at: 1,
+  }],
   folders: [] as Folder[],
 }));
 
@@ -42,15 +51,7 @@ vi.mock("react-i18next", () => ({
 
 vi.mock("../../src/hooks/queries", () => ({
   useAccountsQuery: () => ({
-    data: [{
-      id: "account-1",
-      email: "user@example.com",
-      display_name: "User",
-      provider: "imap",
-      color: null,
-      created_at: 1,
-      updated_at: 1,
-    }],
+    data: mocks.accounts,
   }),
   useFoldersForAccountsQuery: () => ({
     data: mocks.folders,
@@ -84,6 +85,7 @@ describe("Sidebar folder order", () => {
       activeView: "inbox",
       previousView: "inbox",
       showFolderUnreadCount: false,
+      backgroundImage: null,
     });
     useMailStore.setState({
       activeAccountId: "account-1",
@@ -104,6 +106,15 @@ describe("Sidebar folder order", () => {
       folder("archive", "archive", 5),
       folder("sent", "sent", 6),
     ];
+    mocks.accounts = [{
+      id: "account-1",
+      email: "user@example.com",
+      display_name: "User",
+      provider: "imap",
+      color: null,
+      created_at: 1,
+      updated_at: 1,
+    }];
   });
 
   it("uses the same system folder order for a single account as all accounts", () => {
@@ -121,5 +132,45 @@ describe("Sidebar folder order", () => {
       "Trash",
       "Spam",
     ]);
+  });
+
+  it("uses a translucent account selector when an app background is active", () => {
+    mocks.accounts = [
+      {
+        id: "account-1",
+        email: "user@example.com",
+        display_name: "User",
+        provider: "imap",
+        color: null,
+        created_at: 1,
+        updated_at: 1,
+      },
+      {
+        id: "account-2",
+        email: "second@example.com",
+        display_name: "Second",
+        provider: "imap",
+        color: null,
+        created_at: 2,
+        updated_at: 2,
+      },
+    ];
+    useMailStore.setState({ activeAccountId: null });
+    useUIStore.setState({
+      backgroundImage: {
+        path: "/tmp/backgrounds/background.png",
+        filename: "background.png",
+        fit: "cover",
+        opacity: 1,
+        updatedAt: 1,
+      },
+    });
+
+    render(<Sidebar />);
+
+    const selector = screen.getByRole("combobox", { name: "Email Accounts" });
+    const style = selector.getAttribute("style") ?? "";
+    expect(style).toContain("color-mix(in srgb, var(--color-accent) 6%, transparent)");
+    expect(style).not.toContain("background-color: var(--color-bg)");
   });
 });
