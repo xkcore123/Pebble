@@ -3,6 +3,7 @@ use pebble_core::{PebbleError, Result};
 use crate::deeplx::build_segments;
 use crate::types::{LLMMode, TranslateResult};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn translate(
     client: &reqwest::Client,
     endpoint: &str,

@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-05-16
+
+### Added
+
+- Added configurable custom background images with fit, contain, tile, and opacity controls.
+
+### Fixed
+
+- Displayed recipients in sent-mail message lists instead of showing the sender as the current account.
+- Fixed Gmail history sync handling and modal backdrop behavior.
+- Routed translation requests through the configured global proxy.
+
 ## [0.0.7] - 2026-05-09
 
 ### Added
@@ -169,7 +181,8 @@ This release includes:
 - Windows installers are not code-signed yet, so Windows SmartScreen may show a warning.
 - Outlook support is still experimental and depends on Microsoft Graph permissions configured by the user.
 
-[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.0.7...HEAD
+[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.0.8...HEAD
+[0.0.8]: https://github.com/QingJ01/Pebble/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/QingJ01/Pebble/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/QingJ01/Pebble/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/QingJ01/Pebble/compare/v0.0.4...v0.0.5
