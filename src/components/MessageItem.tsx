@@ -2,7 +2,7 @@ import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { Star, Paperclip, Archive, LayoutGrid, ShieldAlert, RotateCcw } from "lucide-react";
-import type { Folder, Label, MessageSummary } from "@/lib/api";
+import type { EmailAddress, Folder, Label, MessageSummary } from "@/lib/api";
 import { updateMessageFlags, archiveMessage, moveToFolder } from "@/lib/api";
 import { useKanbanStore } from "@/stores/kanban.store";
 import { useToastStore } from "@/stores/toast.store";
@@ -38,6 +38,14 @@ function formatDate(timestamp: number): string {
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+function addressLabel(address: EmailAddress): string {
+  return address.name?.trim() || address.address;
+}
+
+function recipientLabel(addresses: EmailAddress[]): string {
+  return addresses.map(addressLabel).filter(Boolean).join(", ");
+}
+
 function MessageItem({ message, labels = [], isSelected, onClick, onToggleStar, batchMode, batchSelected, onToggleBatchSelect, spamFolderId, folderRole, accountColor, accountLabel }: Props) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -48,6 +56,9 @@ function MessageItem({ message, labels = [], isSelected, onClick, onToggleStar, 
     ? t("messageActions.unarchive", "Unarchive")
     : t("messageActions.archive", "Archive");
   const ArchiveActionIcon = folderRole === "archive" ? RotateCcw : Archive;
+  const primaryContact = folderRole === "sent" && message.to_list.length > 0
+    ? recipientLabel(message.to_list)
+    : message.from_name || message.from_address;
 
   function invalidateMessageViews(includeUnreadCounts = false) {
     queryClient.invalidateQueries({ queryKey: ["messages"] });
@@ -142,7 +153,7 @@ function MessageItem({ message, labels = [], isSelected, onClick, onToggleStar, 
           }}
         >
           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-            {message.from_name || message.from_address}
+            {primaryContact}
           </span>
           {!message.is_read && (
             <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--color-accent)", flexShrink: 0 }} />

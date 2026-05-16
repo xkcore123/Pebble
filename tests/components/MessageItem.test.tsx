@@ -265,6 +265,24 @@ describe("MessageItem", () => {
     expect(screen.getByRole("option").className).toContain("message-list-row--unread");
   });
 
+  it("shows recipients as the primary contact in the sent folder", () => {
+    render(
+      <MessageItem
+        message={makeMessage({
+          from_name: "Current Account",
+          from_address: "current@example.com",
+          to_list: [{ name: "Destination", address: "destination@example.com" }],
+        })}
+        isSelected={false}
+        onClick={vi.fn()}
+        folderRole="sent"
+      />,
+    );
+
+    expect(screen.getByText("Destination")).toBeTruthy();
+    expect(screen.queryByText("Current Account")).toBeNull();
+  });
+
   it("does not add unread row treatment to read rows", () => {
     render(
       <MessageItem

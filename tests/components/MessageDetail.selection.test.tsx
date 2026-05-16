@@ -15,7 +15,7 @@ const mockMessage: Message = {
   snippet: "Selected text action test",
   from_address: "sender@example.com",
   from_name: "Sender",
-  to_list: [],
+  to_list: [{ name: "Destination", address: "destination@example.com" }],
   cc_list: [],
   bcc_list: [],
   has_attachments: false,
@@ -57,7 +57,7 @@ vi.mock("../../src/hooks/useMessageLoader", () => ({
 
 vi.mock("../../src/hooks/queries", () => ({
   useAccountsQuery: () => ({
-    data: [{ id: "account-1", email: "recipient@example.com" }],
+    data: [{ id: "account-1", email: "current@example.com" }],
   }),
 }));
 
@@ -150,5 +150,12 @@ describe("MessageDetail selected-text context actions", () => {
 
     expect(body.className).toContain("scroll-region");
     expect(body.className).toContain("message-body-scroll");
+  });
+
+  it("shows message recipients instead of the account email in the header", () => {
+    render(<MessageDetail messageId="message-1" onBack={vi.fn()} />);
+
+    expect(screen.getByText(/destination@example\.com/)).toBeTruthy();
+    expect(screen.queryByText(/current@example\.com/)).toBeNull();
   });
 });
