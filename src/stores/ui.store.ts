@@ -198,21 +198,15 @@ export const useUIStore = create<UIState>((set) => ({
       return;
     }
 
-    // Delegate dirty-compose guard to the compose store
     if (state.activeView === "compose" && view !== "compose") {
-      const composeState = useComposeStore.getState();
-      if (composeState.composeDirty) {
-        useComposeStore.setState({ showComposeLeaveConfirm: true, pendingView: view });
-        return;
-      }
       useComposeStore.setState({
         composeMode: null,
         composeReplyTo: null,
         composePrefill: null,
         composeDirty: false,
+        showComposeLeaveConfirm: false,
+        pendingView: null,
       });
-      set({ activeView: view });
-      return;
     }
 
     set({ activeView: view });

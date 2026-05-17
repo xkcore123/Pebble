@@ -130,8 +130,9 @@ export default function Sidebar() {
   }
 
   async function safeSetActiveView(view: Parameters<typeof setActiveView>[0]) {
-    if (!(await confirmDiscardDraft())) return;
     if (isComposeDirty()) {
+      const confirmed = await confirmDiscardDraft();
+      if (!confirmed) return;
       useComposeStore.getState().discardComposeAndSetActiveView(view);
       return;
     }
@@ -139,8 +140,9 @@ export default function Sidebar() {
   }
 
   async function handleFolderClick(folderId: string) {
-    if (!(await confirmDiscardDraft())) return;
     if (isComposeDirty()) {
+      const confirmed = await confirmDiscardDraft();
+      if (!confirmed) return;
       useComposeStore.getState().discardComposeAndSetActiveView("inbox");
       setActiveFolderId(folderId);
       return;
