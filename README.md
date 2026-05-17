@@ -203,6 +203,16 @@ Pebble/
 
 Shortcuts can be reviewed and customized in Settings.
 
+## Pebble Web
+
+Looking for a self-hosted web version? **[Pebble Web](https://github.com/QingJ01/Pebble-Web)** provides the same features as the desktop app, accessible from any browser via Docker.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/QingJ01/Pebble-Web/main/docker-compose.yml -o docker-compose.yml && docker compose up -d
+```
+
+Pebble Web shares the same Rust core crates and React frontend. Deploy it on your own server and access your email anywhere.
+
 ## Status
 
 Pebble is under active development. It is usable for day-to-day testing, but mail clients handle sensitive data and provider behavior varies. Keep backups of important mail, and verify account actions against your provider when testing new builds.

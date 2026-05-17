@@ -202,6 +202,16 @@ Pebble/
 
 快捷键可以在设置中查看和自定义。
 
+## Pebble Web
+
+想要自托管的网页版？**[Pebble Web](https://github.com/QingJ01/Pebble-Web)** 提供与桌面版相同的功能，通过 Docker 部署，任何浏览器即可访问。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/QingJ01/Pebble-Web/main/docker-compose.yml -o docker-compose.yml && docker compose up -d
+```
+
+Pebble Web 共享相同的 Rust 核心代码和 React 前端。部署到你自己的服务器，随时随地访问邮件。
+
 ## 当前状态
 
 Pebble 正在持续开发中。它可以用于日常测试，但邮件客户端会处理敏感数据，不同邮件服务商的行为也存在差异。测试新版本时，请为重要邮件保留备份，并在服务商网页端核对关键操作。
