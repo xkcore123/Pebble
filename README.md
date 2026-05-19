@@ -94,6 +94,18 @@ Pebble currently supports Gmail, IMAP, and experimental Outlook accounts.
 
 ## Getting Started
 
+### Install
+
+Download prebuilt desktop packages from the [Releases](https://github.com/QingJ01/Pebble/releases) page.
+
+On Arch Linux, Pebble is available from the AUR as `pebble-bin`:
+
+```bash
+yay -S pebble-bin
+# or
+paru -S pebble-bin
+```
+
 ### Prerequisites
 
 - Rust stable
