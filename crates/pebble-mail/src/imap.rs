@@ -12,6 +12,7 @@ use serde::de::Deserializer;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio_native_tls as async_native_tls;
 use tokio_rustls::client::TlsStream;
 use tracing::debug;
 
@@ -222,6 +223,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<T> {
 /// `match self.session { Tls(_) => ..., Plain(_) => ... }` duplication.
 enum InnerStream {
     Tls(Box<TlsStream<TcpStream>>),
+    NativeTls(Box<async_native_tls::TlsStream<TcpStream>>),
     Plain(TcpStream),
 }
 
@@ -229,6 +231,7 @@ impl std::fmt::Debug for InnerStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InnerStream::Tls(_) => f.debug_struct("InnerStream::Tls").finish(),
+            InnerStream::NativeTls(_) => f.debug_struct("InnerStream::NativeTls").finish(),
             InnerStream::Plain(_) => f.debug_struct("InnerStream::Plain").finish(),
         }
     }
@@ -242,6 +245,7 @@ impl AsyncRead for InnerStream {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             InnerStream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+            InnerStream::NativeTls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
             InnerStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
@@ -255,6 +259,7 @@ impl AsyncWrite for InnerStream {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             InnerStream::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+            InnerStream::NativeTls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
             InnerStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
@@ -262,6 +267,7 @@ impl AsyncWrite for InnerStream {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             InnerStream::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+            InnerStream::NativeTls(s) => Pin::new(s.as_mut()).poll_flush(cx),
             InnerStream::Plain(s) => Pin::new(s).poll_flush(cx),
         }
     }
@@ -269,6 +275,7 @@ impl AsyncWrite for InnerStream {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             InnerStream::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+            InnerStream::NativeTls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
             InnerStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
@@ -332,6 +339,28 @@ async fn tls_connect(host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>>
         &format!("TLS handshake with {host}"),
         IMAP_CONNECT_TIMEOUT_SECS,
         connector.connect(server_name, tcp),
+    )
+    .await
+}
+
+/// Build a native-tls connector (delegates to OS TLS: SChannel/SecureTransport/OpenSSL).
+fn build_native_tls_connector() -> Result<async_native_tls::TlsConnector> {
+    let connector = native_tls::TlsConnector::new()
+        .map_err(|e| PebbleError::Network(format!("native-tls init: {e}")))?;
+    Ok(async_native_tls::TlsConnector::from(connector))
+}
+
+/// Perform a TLS handshake using native-tls (OS TLS backend) on the given TCP stream.
+/// Used as fallback when rustls fails (e.g. servers that only offer DHE cipher suites).
+async fn native_tls_connect(
+    host: &str,
+    tcp: TcpStream,
+) -> Result<async_native_tls::TlsStream<TcpStream>> {
+    let connector = build_native_tls_connector()?;
+    with_imap_timeout(
+        &format!("TLS handshake (native-tls) with {host}"),
+        IMAP_CONNECT_TIMEOUT_SECS,
+        connector.connect(host, tcp),
     )
     .await
 }
@@ -415,16 +444,9 @@ impl ImapProvider {
         Ok(greeting)
     }
 
-    /// Send STARTTLS command on a raw TCP stream and upgrade to TLS.
-    /// Returns the original greeting bytes (for replay) and the TLS stream.
-    async fn starttls_upgrade(
-        host: &str,
-        tcp: TcpStream,
-        greeting: Vec<u8>,
-    ) -> Result<(Vec<u8>, TlsStream<TcpStream>)> {
-        let mut tcp = tcp;
-
-        // Send STARTTLS command
+    /// Send STARTTLS command and read the server response.
+    /// Returns the TCP stream ready for TLS upgrade.
+    async fn negotiate_starttls(mut tcp: TcpStream) -> Result<TcpStream> {
         with_imap_timeout(
             "Send STARTTLS",
             IMAP_COMMAND_TIMEOUT_SECS,
@@ -433,7 +455,6 @@ impl ImapProvider {
         .await?;
         with_imap_timeout("Flush STARTTLS", IMAP_COMMAND_TIMEOUT_SECS, tcp.flush()).await?;
 
-        // Read STARTTLS response
         let mut resp = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
@@ -461,11 +482,87 @@ impl ImapProvider {
             }
         }
         debug!("STARTTLS accepted, upgrading connection");
+        Ok(tcp)
+    }
 
-        // Upgrade to TLS
-        let tls_stream = tls_connect(host, tcp).await?;
+    /// Connect via STARTTLS: read greeting, optionally send ID, negotiate
+    /// STARTTLS, upgrade to TLS (rustls or native-tls), then login.
+    async fn connect_starttls(
+        &self,
+        tcp: TcpStream,
+        needs_id: bool,
+        use_native_tls: bool,
+    ) -> Result<ImapSession> {
+        let mut tcp = tcp;
 
-        Ok((greeting, tls_stream))
+        // Read greeting
+        let mut greeting = vec![0u8; 8192];
+        let n = with_imap_timeout(
+            "Read greeting",
+            IMAP_COMMAND_TIMEOUT_SECS,
+            tcp.read(&mut greeting),
+        )
+        .await?;
+        greeting.truncate(n);
+
+        // Send ID command before STARTTLS if needed (on plain connection)
+        if needs_id {
+            with_imap_timeout(
+                "Send ID",
+                IMAP_COMMAND_TIMEOUT_SECS,
+                tcp.write_all(
+                    b"A000 ID (\"name\" \"Pebble\" \"version\" \"1.0\" \"vendor\" \"Pebble\")\r\n",
+                ),
+            )
+            .await?;
+            with_imap_timeout("Flush ID", IMAP_COMMAND_TIMEOUT_SECS, tcp.flush()).await?;
+
+            let mut resp = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = with_imap_timeout(
+                    "Read ID response",
+                    IMAP_COMMAND_TIMEOUT_SECS,
+                    tcp.read(&mut buf),
+                )
+                .await?;
+                if n == 0 {
+                    return Err(PebbleError::Network("Connection closed during ID".into()));
+                }
+                resp.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&resp);
+                if text.contains("A000 OK")
+                    || text.contains("A000 NO")
+                    || text.contains("A000 BAD")
+                {
+                    break;
+                }
+            }
+            debug!("IMAP ID command accepted (pre-STARTTLS)");
+        }
+
+        // STARTTLS negotiation
+        let tcp = Self::negotiate_starttls(tcp).await?;
+
+        // TLS upgrade
+        let inner = if use_native_tls {
+            let tls = native_tls_connect(&self.config.host, tcp).await?;
+            InnerStream::NativeTls(Box::new(tls))
+        } else {
+            let tls = tls_connect(&self.config.host, tcp).await?;
+            InnerStream::Tls(Box::new(tls))
+        };
+
+        // Replay the original greeting so Client::new() is happy
+        let stream = PrefixedStream::with_prefix(greeting, inner);
+        let client = Client::new(stream);
+        tokio::time::timeout(
+            Duration::from_secs(IMAP_COMMAND_TIMEOUT_SECS),
+            client.login(&self.config.username, &self.config.password),
+        )
+        .await
+        .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
+        .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))
     }
 
     /// Establish a TCP connection, optionally through a SOCKS5 proxy.
@@ -517,20 +614,37 @@ impl ImapProvider {
 
         let session: ImapSession = match self.config.security {
             ConnectionSecurity::Tls => {
-                // Implicit TLS — wrap immediately
+                // Implicit TLS — wrap immediately; try rustls, fall back to native-tls
                 debug!(
-                    "Starting TLS handshake (rustls) with SNI={}",
+                    "Starting TLS handshake with SNI={}",
                     self.config.host
                 );
-                let mut tls_stream = tls_connect(&self.config.host, tcp).await?;
+                let inner = match tls_connect(&self.config.host, tcp).await {
+                    Ok(tls) => InnerStream::Tls(Box::new(tls)),
+                    Err(rustls_err) => {
+                        debug!(
+                            "rustls handshake failed ({}), retrying with native-tls",
+                            rustls_err
+                        );
+                        let tcp = self.tcp_connect().await?;
+                        let tls = native_tls_connect(&self.config.host, tcp)
+                            .await
+                            .map_err(|e| {
+                                PebbleError::Network(format!(
+                                    "TLS failed with both backends — rustls: {rustls_err}, native-tls: {e}"
+                                ))
+                            })?;
+                        InnerStream::NativeTls(Box::new(tls))
+                    }
+                };
 
+                let mut inner = inner;
                 let prefix = if needs_id {
-                    Self::send_id_before_login(&mut tls_stream).await?
+                    Self::send_id_before_login(&mut inner).await?
                 } else {
                     Vec::new()
                 };
-                let stream =
-                    PrefixedStream::with_prefix(prefix, InnerStream::Tls(Box::new(tls_stream)));
+                let stream = PrefixedStream::with_prefix(prefix, inner);
 
                 let client = Client::new(stream);
                 tokio::time::timeout(
@@ -542,68 +656,25 @@ impl ImapProvider {
                 .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))?
             }
             ConnectionSecurity::StartTls => {
-                // Connect plain, read greeting, optionally send ID, then STARTTLS upgrade
-                let mut tcp = tcp;
-
-                // Read greeting
-                let mut greeting = vec![0u8; 8192];
-                let n = with_imap_timeout(
-                    "Read greeting",
-                    IMAP_COMMAND_TIMEOUT_SECS,
-                    tcp.read(&mut greeting),
-                )
-                .await?;
-                greeting.truncate(n);
-
-                // Send ID command before STARTTLS if needed (on plain connection)
-                if needs_id {
-                    with_imap_timeout(
-                        "Send ID",
-                        IMAP_COMMAND_TIMEOUT_SECS,
-                        tcp.write_all(b"A000 ID (\"name\" \"Pebble\" \"version\" \"1.0\" \"vendor\" \"Pebble\")\r\n"),
-                    )
-                    .await?;
-                    with_imap_timeout("Flush ID", IMAP_COMMAND_TIMEOUT_SECS, tcp.flush()).await?;
-
-                    let mut resp = Vec::new();
-                    let mut buf = [0u8; 4096];
-                    loop {
-                        let n = with_imap_timeout(
-                            "Read ID response",
-                            IMAP_COMMAND_TIMEOUT_SECS,
-                            tcp.read(&mut buf),
-                        )
-                        .await?;
-                        if n == 0 {
-                            return Err(PebbleError::Network("Connection closed during ID".into()));
-                        }
-                        resp.extend_from_slice(&buf[..n]);
-                        let text = String::from_utf8_lossy(&resp);
-                        if text.contains("A000 OK")
-                            || text.contains("A000 NO")
-                            || text.contains("A000 BAD")
-                        {
-                            break;
-                        }
+                // Connect plain, read greeting, optionally send ID, STARTTLS, upgrade TLS.
+                // Try rustls first, fall back to native-tls on handshake failure.
+                match self.connect_starttls(tcp, needs_id, false).await {
+                    Ok(session) => session,
+                    Err(rustls_err) => {
+                        debug!(
+                            "STARTTLS with rustls failed ({}), retrying with native-tls",
+                            rustls_err
+                        );
+                        let tcp = self.tcp_connect().await?;
+                        self.connect_starttls(tcp, needs_id, true)
+                            .await
+                            .map_err(|native_err| {
+                                PebbleError::Network(format!(
+                                    "STARTTLS failed with both TLS backends — rustls: {rustls_err}, native-tls: {native_err}"
+                                ))
+                            })?
                     }
-                    debug!("IMAP ID command accepted (pre-STARTTLS)");
                 }
-
-                // STARTTLS upgrade
-                let (greeting, tls_stream) =
-                    Self::starttls_upgrade(&self.config.host, tcp, greeting).await?;
-
-                // Replay the original greeting so Client::new() is happy
-                let stream =
-                    PrefixedStream::with_prefix(greeting, InnerStream::Tls(Box::new(tls_stream)));
-                let client = Client::new(stream);
-                tokio::time::timeout(
-                    Duration::from_secs(IMAP_COMMAND_TIMEOUT_SECS),
-                    client.login(&self.config.username, &self.config.password),
-                )
-                .await
-                .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
-                .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))?
             }
             ConnectionSecurity::Plain => {
                 // Plain TCP — no encryption
@@ -683,37 +754,122 @@ impl ImapProvider {
             tcp
         };
 
+        // Helper: reconnect TCP for TLS fallback (no report, just the socket)
+        let reconnect_tcp = |config: &ImapConfig| {
+            let addr_clone = addr.clone();
+            let proxy = config.proxy.clone();
+            async move {
+                if let Some(ref proxy) = proxy {
+                    let proxy_addr = format!("{}:{}", proxy.host, proxy.port);
+                    let stream = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        tokio_socks::tcp::Socks5Stream::connect(
+                            proxy_addr.as_str(),
+                            addr_clone.as_str(),
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        PebbleError::Network(format!(
+                            "SOCKS5 reconnect to {proxy_addr} timed out (10s)"
+                        ))
+                    })?
+                    .map_err(|e| PebbleError::Network(format!("SOCKS5 proxy: {e}")))?;
+                    Ok::<TcpStream, PebbleError>(stream.into_inner())
+                } else {
+                    let tcp = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        TcpStream::connect(&addr_clone),
+                    )
+                    .await
+                    .map_err(|_| {
+                        PebbleError::Network(format!(
+                            "TCP reconnect to {addr_clone} timed out (10s)"
+                        ))
+                    })?
+                    .map_err(|e| PebbleError::Network(format!("TCP reconnect: {e}")))?;
+                    Ok::<TcpStream, PebbleError>(tcp)
+                }
+            }
+        };
+
         // Step 2: TLS handshake (if applicable)
         match config.security {
             ConnectionSecurity::Tls => {
                 let t1 = Instant::now();
-                let mut tls = tokio::time::timeout(
+                match tokio::time::timeout(
                     std::time::Duration::from_secs(10),
                     tls_connect(&config.host, tcp),
                 )
                 .await
-                .map_err(|_| PebbleError::Network("TLS handshake timed out (10s)".into()))??;
-                report.push_str(&format!(
-                    "TLS handshake (implicit): OK ({:.0}ms)\n",
-                    t1.elapsed().as_millis()
-                ));
-
-                // Step 3: Read IMAP greeting
-                let t2 = Instant::now();
-                let mut buf = vec![0u8; 4096];
-                let n =
-                    tokio::time::timeout(std::time::Duration::from_secs(10), tls.read(&mut buf))
+                {
+                    Ok(Ok(mut tls)) => {
+                        report.push_str(&format!(
+                            "TLS handshake (rustls): OK ({:.0}ms)\n",
+                            t1.elapsed().as_millis()
+                        ));
+                        let t2 = Instant::now();
+                        let mut buf = vec![0u8; 4096];
+                        let n = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            tls.read(&mut buf),
+                        )
                         .await
                         .map_err(|_| {
                             PebbleError::Network("Read IMAP greeting timed out (10s)".into())
                         })?
                         .map_err(|e| PebbleError::Network(format!("Read greeting: {e}")))?;
-                let greeting = String::from_utf8_lossy(&buf[..n]);
-                report.push_str(&format!(
-                    "IMAP greeting ({:.0}ms): {}\n",
-                    t2.elapsed().as_millis(),
-                    greeting.trim()
-                ));
+                        let greeting = String::from_utf8_lossy(&buf[..n]);
+                        report.push_str(&format!(
+                            "IMAP greeting ({:.0}ms): {}\n",
+                            t2.elapsed().as_millis(),
+                            greeting.trim()
+                        ));
+                    }
+                    Ok(Err(rustls_err)) => {
+                        report.push_str(&format!(
+                            "TLS handshake (rustls): FAILED — {rustls_err}\n"
+                        ));
+                        let tcp = reconnect_tcp(config).await?;
+                        let t_ntls = Instant::now();
+                        let mut tls = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            native_tls_connect(&config.host, tcp),
+                        )
+                        .await
+                        .map_err(|_| {
+                            PebbleError::Network(
+                                "native-tls handshake timed out (10s)".into(),
+                            )
+                        })??;
+                        report.push_str(&format!(
+                            "TLS handshake (native-tls fallback): OK ({:.0}ms)\n",
+                            t_ntls.elapsed().as_millis()
+                        ));
+                        let t2 = Instant::now();
+                        let mut buf = vec![0u8; 4096];
+                        let n = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            tls.read(&mut buf),
+                        )
+                        .await
+                        .map_err(|_| {
+                            PebbleError::Network("Read IMAP greeting timed out (10s)".into())
+                        })?
+                        .map_err(|e| PebbleError::Network(format!("Read greeting: {e}")))?;
+                        let greeting = String::from_utf8_lossy(&buf[..n]);
+                        report.push_str(&format!(
+                            "IMAP greeting ({:.0}ms): {}\n",
+                            t2.elapsed().as_millis(),
+                            greeting.trim()
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(PebbleError::Network(
+                            "TLS handshake timed out (10s)".into(),
+                        ));
+                    }
+                }
             }
             ConnectionSecurity::StartTls => {
                 // Read plain greeting first
@@ -759,18 +915,79 @@ impl ImapProvider {
                     resp_str.trim()
                 ));
 
-                // TLS upgrade
+                // TLS upgrade — try rustls, fall back to native-tls
                 let t3 = Instant::now();
-                tokio::time::timeout(
+                match tokio::time::timeout(
                     std::time::Duration::from_secs(10),
                     tls_connect(&config.host, tcp),
                 )
                 .await
-                .map_err(|_| PebbleError::Network("TLS upgrade timed out (10s)".into()))??;
-                report.push_str(&format!(
-                    "TLS upgrade (STARTTLS): OK ({:.0}ms)\n",
-                    t3.elapsed().as_millis()
-                ));
+                {
+                    Ok(Ok(_)) => {
+                        report.push_str(&format!(
+                            "TLS upgrade (STARTTLS, rustls): OK ({:.0}ms)\n",
+                            t3.elapsed().as_millis()
+                        ));
+                    }
+                    Ok(Err(rustls_err)) => {
+                        report.push_str(&format!(
+                            "TLS upgrade (STARTTLS, rustls): FAILED — {rustls_err}\n"
+                        ));
+                        // Reconnect and redo STARTTLS with native-tls
+                        let tcp = reconnect_tcp(config).await?;
+                        let mut tcp = tcp;
+                        // Re-read greeting (discard)
+                        let mut discard = vec![0u8; 4096];
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            tcp.read(&mut discard),
+                        )
+                        .await
+                        .map_err(|_| {
+                            PebbleError::Network("Read greeting timed out (10s)".into())
+                        })?
+                        .map_err(|e| PebbleError::Network(format!("Read greeting: {e}")))?;
+                        // Re-send STARTTLS
+                        tcp.write_all(b"A001 STARTTLS\r\n")
+                            .await
+                            .map_err(|e| PebbleError::Network(format!("Send STARTTLS: {e}")))?;
+                        tcp.flush()
+                            .await
+                            .map_err(|e| PebbleError::Network(format!("Flush: {e}")))?;
+                        let mut resp2 = vec![0u8; 4096];
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            tcp.read(&mut resp2),
+                        )
+                        .await
+                        .map_err(|_| {
+                            PebbleError::Network("STARTTLS response timed out (10s)".into())
+                        })?
+                        .map_err(|e| {
+                            PebbleError::Network(format!("Read STARTTLS response: {e}"))
+                        })?;
+                        let t4 = Instant::now();
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            native_tls_connect(&config.host, tcp),
+                        )
+                        .await
+                        .map_err(|_| {
+                            PebbleError::Network(
+                                "native-tls upgrade timed out (10s)".into(),
+                            )
+                        })??;
+                        report.push_str(&format!(
+                            "TLS upgrade (STARTTLS, native-tls fallback): OK ({:.0}ms)\n",
+                            t4.elapsed().as_millis()
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(PebbleError::Network(
+                            "TLS upgrade timed out (10s)".into(),
+                        ));
+                    }
+                }
             }
             ConnectionSecurity::Plain => {
                 // Read plain greeting
@@ -1540,11 +1757,16 @@ pub fn folder_sort_order(role: &Option<FolderRole>) -> i32 {
 
 #[cfg(test)]
 mod tls_config_tests {
-    use super::{build_tls_connector, imap_timeout_error};
+    use super::{build_native_tls_connector, build_tls_connector, imap_timeout_error};
 
     #[test]
     fn build_tls_connector_returns_result() {
         assert!(build_tls_connector().is_ok());
+    }
+
+    #[test]
+    fn build_native_tls_connector_returns_result() {
+        assert!(build_native_tls_connector().is_ok());
     }
 
     #[test]

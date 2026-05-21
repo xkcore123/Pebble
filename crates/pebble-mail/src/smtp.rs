@@ -10,6 +10,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_native_tls as async_native_tls;
 
 pub struct SmtpSender {
     host: String,
@@ -190,25 +191,61 @@ impl SmtpSender {
                         .await
                         .map_err(|e| PebbleError::Network(format!("SOCKS5 connect failed: {e}")))?;
 
-                // We need to upgrade the raw TCP stream to TLS before SMTP handshake.
-                // Use tokio-rustls directly since we already have a connected stream.
+                // Try rustls first, fall back to native-tls if handshake fails
                 let rustls_config = build_rustls_client_config()?;
                 let connector = tokio_rustls::TlsConnector::from(rustls_config);
                 let domain = rustls::pki_types::ServerName::try_from(self.host.clone())
                     .map_err(|e| PebbleError::Network(format!("Invalid TLS server name: {e}")))?;
-                let tls_stream = connector
+
+                match connector
                     .connect(domain, socks_stream.into_inner())
                     .await
-                    .map_err(|e| PebbleError::Network(format!("TLS handshake failed: {e}")))?;
-
-                let mut conn = AsyncSmtpConnection::connect_with_transport(
-                    Box::new(DebugStream(tls_stream)),
-                    &hello_name,
-                )
-                .await
-                .map_err(|e| PebbleError::Network(format!("SMTP handshake failed: {e}")))?;
-
-                authenticate_and_send(&mut conn, &self.credentials, email).await?;
+                {
+                    Ok(tls_stream) => {
+                        let mut conn = AsyncSmtpConnection::connect_with_transport(
+                            Box::new(DebugStream(tls_stream)),
+                            &hello_name,
+                        )
+                        .await
+                        .map_err(|e| {
+                            PebbleError::Network(format!("SMTP handshake failed: {e}"))
+                        })?;
+                        authenticate_and_send(&mut conn, &self.credentials, email).await?;
+                    }
+                    Err(rustls_err) => {
+                        tracing::debug!(
+                            "SMTP rustls handshake failed ({}), retrying with native-tls",
+                            rustls_err
+                        );
+                        // Reconnect SOCKS5 and try native-tls
+                        let socks_stream = tokio_socks::tcp::Socks5Stream::connect(
+                            proxy_addr.as_str(),
+                            target.as_str(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            PebbleError::Network(format!("SOCKS5 reconnect failed: {e}"))
+                        })?;
+                        let native_connector = build_native_tls_connector()?;
+                        let tls_stream = native_connector
+                            .connect(&self.host, socks_stream.into_inner())
+                            .await
+                            .map_err(|e| {
+                                PebbleError::Network(format!(
+                                    "TLS failed with both backends — rustls: {rustls_err}, native-tls: {e}"
+                                ))
+                            })?;
+                        let mut conn = AsyncSmtpConnection::connect_with_transport(
+                            Box::new(DebugStream(tls_stream)),
+                            &hello_name,
+                        )
+                        .await
+                        .map_err(|e| {
+                            PebbleError::Network(format!("SMTP handshake failed: {e}"))
+                        })?;
+                        authenticate_and_send(&mut conn, &self.credentials, email).await?;
+                    }
+                }
             }
             ConnectionSecurity::StartTls => {
                 let socks_stream =
@@ -289,6 +326,13 @@ fn build_rustls_client_config() -> Result<std::sync::Arc<rustls::ClientConfig>> 
         .with_root_certificates(root_store)
         .with_no_client_auth();
     Ok(std::sync::Arc::new(config))
+}
+
+/// Build a native-tls connector (OS TLS backend: SChannel/SecureTransport/OpenSSL).
+fn build_native_tls_connector() -> Result<async_native_tls::TlsConnector> {
+    let connector = native_tls::TlsConnector::new()
+        .map_err(|e| PebbleError::Network(format!("native-tls init: {e}")))?;
+    Ok(async_native_tls::TlsConnector::from(connector))
 }
 
 // ---------------------------------------------------------------------------
@@ -450,10 +494,15 @@ fn mime_type_from_extension(ext: &str) -> ContentType {
 
 #[cfg(test)]
 mod tls_config_tests {
-    use super::build_rustls_client_config;
+    use super::{build_native_tls_connector, build_rustls_client_config};
 
     #[test]
     fn build_rustls_client_config_returns_result() {
         assert!(build_rustls_client_config().is_ok());
+    }
+
+    #[test]
+    fn build_native_tls_connector_returns_result() {
+        assert!(build_native_tls_connector().is_ok());
     }
 }

@@ -16,6 +16,8 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 mail-parser = { workspace = true }
+native-tls = { workspace = true }
+tokio-native-tls = { workspace = true }
 async-trait = "0.1"
 futures = "0.3"
 utf7-imap = "0.3"
