@@ -90,30 +90,7 @@ fn validate_save_path(save_to: &str) -> Result<(), PebbleError> {
         ));
     }
 
-    // Ensure target is within user home directory to prevent writes to system paths
-    let home = home_dir()
-        .ok_or_else(|| PebbleError::Internal("Cannot determine user home directory".to_string()))?;
-    if !canonical.starts_with(&home) {
-        return Err(PebbleError::Validation(
-            "Save path must be within user home directory".to_string(),
-        ));
-    }
-
     Ok(())
-}
-
-/// Get the user's home directory.
-fn home_dir() -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("USERPROFILE")
-            .ok()
-            .map(std::path::PathBuf::from)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var("HOME").ok().map(std::path::PathBuf::from)
-    }
 }
 
 fn copy_attachment_file_safely<F>(
