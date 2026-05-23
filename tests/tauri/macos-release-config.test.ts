@@ -30,7 +30,7 @@ describe("macOS release configuration", () => {
     expect(packageJson.scripts["build:linux"]).toBeTypeOf("string");
     expect(packageJson.scripts["build:windows"]).toContain("--bundles nsis");
     expect(packageJson.scripts["build:macos"]).toContain("--bundles app,dmg");
-    expect(packageJson.scripts["build:linux"]).toContain("--bundles appimage");
+    expect(packageJson.scripts["build:linux"]).toContain("--bundles appimage,deb,rpm");
   });
 
   it("routes the generic build command to platform-specific bundles", async () => {
@@ -43,7 +43,7 @@ describe("macOS release configuration", () => {
     expect(buildScriptSource).not.toMatch(/^#!/);
     expect(buildScript.bundleTargetsForPlatform("win32")).toBe("nsis");
     expect(buildScript.bundleTargetsForPlatform("darwin")).toBe("app,dmg");
-    expect(buildScript.bundleTargetsForPlatform("linux")).toBe("appimage");
+    expect(buildScript.bundleTargetsForPlatform("linux")).toBe("appimage,deb,rpm");
   });
 
   it("keeps desktop notification clicks routable to the target message", () => {
@@ -99,8 +99,10 @@ describe("macOS release configuration", () => {
     expect(ciWorkflow).toContain("ubuntu-latest");
     expect(ciWorkflow).toContain("Install Linux system dependencies");
     expect(ciWorkflow).toContain("pnpm ${{ matrix.build_script }}");
-    expect(ciWorkflow).toContain("Upload Linux AppImage artifact");
+    expect(ciWorkflow).toContain("Upload Linux package artifacts");
     expect(ciWorkflow).toContain("target/release/bundle/appimage/*.AppImage");
+    expect(ciWorkflow).toContain("target/release/bundle/deb/*.deb");
+    expect(ciWorkflow).toContain("target/release/bundle/rpm/*.rpm");
     expect(ciWorkflow).toContain("build:windows");
     expect(ciWorkflow).toContain("build:macos");
     expect(ciWorkflow).toContain("build:linux");
@@ -123,18 +125,22 @@ describe("macOS release configuration", () => {
     expect(releaseWorkflow).toContain("pebble-macos-${{ matrix.arch }}-${{ env.PEBBLE_VERSION }}");
   });
 
-  it("uploads Linux AppImage artifacts during tagged releases", () => {
+  it("uploads Linux package artifacts during tagged releases", () => {
     const releaseWorkflow = readFileSync(
       resolve(process.cwd(), ".github", "workflows", "release.yml"),
       "utf8",
     );
 
-    expect(releaseWorkflow).toContain("Linux AppImage Release");
+    expect(releaseWorkflow).toContain("Linux Package Release");
     expect(releaseWorkflow).toContain("runs-on: ubuntu-latest");
     expect(releaseWorkflow).toContain("Install Linux system dependencies");
     expect(releaseWorkflow).toContain("pnpm build:linux");
     expect(releaseWorkflow).toContain("target/release/bundle/appimage");
+    expect(releaseWorkflow).toContain("target/release/bundle/deb");
+    expect(releaseWorkflow).toContain("target/release/bundle/rpm");
     expect(releaseWorkflow).toContain("*.AppImage");
-    expect(releaseWorkflow).toContain("pebble-linux-appimage-${{ env.PEBBLE_VERSION }}");
+    expect(releaseWorkflow).toContain("*.deb");
+    expect(releaseWorkflow).toContain("*.rpm");
+    expect(releaseWorkflow).toContain("pebble-linux-packages-${{ env.PEBBLE_VERSION }}");
   });
 });

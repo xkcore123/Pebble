@@ -95,7 +95,7 @@ input,
 textarea,
 select,
 option {
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
 input,

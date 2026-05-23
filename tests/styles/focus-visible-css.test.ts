@@ -18,10 +18,11 @@ describe("focus-visible CSS", () => {
     expect(css).toMatch(/\.batch-checkbox::before\s*\{[^}]*border-left\s*:/i);
   });
 
-  it("themes native form controls in dark mode", () => {
+  it("keeps native form controls aligned with the app theme", () => {
     const css = readFileSync(join(process.cwd(), "src", "styles", "index.css"), "utf8");
 
-    expect(css).toMatch(/input,\s*textarea,\s*select,\s*option\s*\{[^}]*color-scheme\s*:\s*light dark/i);
+    expect(css).toMatch(/input,\s*textarea,\s*select,\s*option\s*\{[^}]*color-scheme\s*:\s*light/i);
+    expect(css).not.toMatch(/input,\s*textarea,\s*select,\s*option\s*\{[^}]*color-scheme\s*:\s*light dark/i);
     expect(css).toMatch(/input\[type="checkbox"\],\s*input\[type="radio"\]\s*\{[^}]*accent-color\s*:\s*var\(--color-accent\)/i);
     expect(css).toMatch(/\[data-theme="dark"\]\s*input,\s*\[data-theme="dark"\]\s*textarea,\s*\[data-theme="dark"\]\s*select,\s*\[data-theme="dark"\]\s*option\s*\{[^}]*color-scheme\s*:\s*dark/i);
     expect(css).toMatch(/\[data-theme="dark"\]\s*select,\s*\[data-theme="dark"\]\s*option\s*\{[^}]*background-color\s*:\s*var\(--color-bg\)/i);

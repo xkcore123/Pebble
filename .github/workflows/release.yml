@@ -182,7 +182,7 @@ jobs:
           }
 
   linux:
-    name: Linux AppImage Release
+    name: Linux Package Release
     needs: windows
     runs-on: ubuntu-latest
     environment: action
@@ -230,7 +230,8 @@ jobs:
             librsvg2-dev \
             libdbus-1-dev \
             libkeyutils-dev \
-            patchelf
+            patchelf \
+            rpm
 
       - name: Validate release version
         run: |
@@ -281,7 +282,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Linux AppImage
+      - name: Build Linux packages
         env:
           GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -298,24 +299,28 @@ jobs:
           search_dirs=(
             "target/release/bundle/appimage"
             "src-tauri/target/release/bundle/appimage"
+            "target/release/bundle/deb"
+            "src-tauri/target/release/bundle/deb"
+            "target/release/bundle/rpm"
+            "src-tauri/target/release/bundle/rpm"
           )
 
           found=()
           for dir in "${search_dirs[@]}"; do
             if [[ -d "$dir" ]]; then
-              while IFS= read -r -d '' appimage; do
-                found+=("$appimage")
-              done < <(find "$dir" -maxdepth 1 -type f -name "*.AppImage" -print0)
+              while IFS= read -r -d '' package; do
+                found+=("$package")
+              done < <(find "$dir" -maxdepth 1 -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -print0)
             fi
           done
 
           if [[ "${#found[@]}" -eq 0 ]]; then
-            echo "No AppImage found in expected Linux bundle directories." >&2
+            echo "No Linux package artifacts found in expected bundle directories." >&2
             exit 1
           fi
 
-          for appimage in "${found[@]}"; do
-            cp "$appimage" "$artifact_dir/$(basename "$appimage")"
+          for package in "${found[@]}"; do
+            cp "$package" "$artifact_dir/$(basename "$package")"
           done
 
           for file in "$artifact_dir"/*; do
@@ -328,7 +333,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pebble-linux-appimage-${{ env.PEBBLE_VERSION }}
+          name: pebble-linux-packages-${{ env.PEBBLE_VERSION }}
           path: release-artifacts/*
           if-no-files-found: error
 

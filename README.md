@@ -137,7 +137,7 @@ pnpm build:linux
 ```
 
 Desktop bundles are written under `target/release/` and `target/release/bundle/`.
-On Linux, install the Tauri system dependencies first; `pnpm build:linux` produces an AppImage under `target/release/bundle/appimage/`.
+On Linux, install the Tauri system dependencies first; `pnpm build:linux` produces AppImage, deb, and rpm packages under `target/release/bundle/`.
 macOS bundles are unsigned unless you provide your own signing setup.
 After copying an unsigned macOS build to `/Applications`, run the following command before opening it:
 
@@ -169,7 +169,7 @@ Copy `.env.example` to `.env`, then fill the provider values you need.
 | `pnpm build` | Build the desktop app for the current platform. |
 | `pnpm build:windows` | Build the Windows NSIS installer. |
 | `pnpm build:macos` | Build unsigned macOS `.app` and `.dmg` bundles. |
-| `pnpm build:linux` | Build the Linux `.AppImage` bundle. |
+| `pnpm build:linux` | Build Linux `.AppImage`, `.deb`, and `.rpm` packages. |
 | `cargo test -p pebble-mail` | Run the mail crate tests. |
 | `cargo check` | Check the Rust workspace. |
 

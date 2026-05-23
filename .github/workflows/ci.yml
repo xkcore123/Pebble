@@ -65,7 +65,8 @@ jobs:
             librsvg2-dev \
             libdbus-1-dev \
             libkeyutils-dev \
-            patchelf
+            patchelf \
+            rpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -88,12 +89,16 @@ jobs:
       - name: Build desktop package
         run: pnpm ${{ matrix.build_script }}
 
-      - name: Upload Linux AppImage artifact
+      - name: Upload Linux package artifacts
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: pebble-linux-appimage
+          name: pebble-linux-packages
           path: |
             target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/rpm/*.rpm
           if-no-files-found: error
