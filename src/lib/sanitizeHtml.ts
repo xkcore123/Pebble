@@ -116,9 +116,75 @@ function normalizeLinkAttributes(html: string): string {
   return template.innerHTML;
 }
 
+function filterStylesheetLinks(html: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  template.content.querySelectorAll<HTMLLinkElement>("link").forEach((link) => {
+    const rel = link.getAttribute("rel")?.toLowerCase() ?? "";
+    const href = link.getAttribute("href")?.trim() ?? "";
+    const isStylesheet = rel.split(/\s+/).includes("stylesheet");
+    const isHttp = /^https?:\/\//i.test(href);
+    if (!isStylesheet || !isHttp) {
+      link.remove();
+    }
+  });
+  return template.innerHTML;
+}
+
+function looksLikeFullHtmlDocument(html: string): boolean {
+  return /<\s*(html|head|body)\b/i.test(html);
+}
+
+function escapeAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function extractApprovedCssNodes(html: string): { cssNodes: string; htmlWithoutCssNodes: string } {
+  if (looksLikeFullHtmlDocument(html)) {
+    return { cssNodes: "", htmlWithoutCssNodes: html };
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const cssNodes: string[] = [];
+
+  template.content.querySelectorAll<HTMLStyleElement>("style").forEach((style) => {
+    cssNodes.push(`<style>${style.textContent ?? ""}</style>`);
+    style.remove();
+  });
+
+  template.content.querySelectorAll<HTMLLinkElement>("link").forEach((link) => {
+    const rel = link.getAttribute("rel")?.toLowerCase() ?? "";
+    const href = link.getAttribute("href")?.trim() ?? "";
+    const isStylesheet = rel.split(/\s+/).includes("stylesheet");
+    const isHttp = /^https?:\/\//i.test(href);
+    if (isStylesheet && isHttp) {
+      const type = link.getAttribute("type")?.trim();
+      const media = link.getAttribute("media")?.trim();
+      cssNodes.push(
+        `<link rel="stylesheet" href="${escapeAttribute(href)}"` +
+          (type ? ` type="${escapeAttribute(type)}"` : "") +
+          (media ? ` media="${escapeAttribute(media)}"` : "") +
+          ">",
+      );
+    }
+    link.remove();
+  });
+
+  return {
+    cssNodes: cssNodes.join(""),
+    htmlWithoutCssNodes: template.innerHTML,
+  };
+}
+
 /** Sanitize HTML to prevent XSS while preserving email formatting. */
 export function sanitizeHtml(html: string): string {
-  const sanitized = DOMPurify.sanitize(html, {
+  const { cssNodes, htmlWithoutCssNodes } = extractApprovedCssNodes(html);
+  const sanitized = DOMPurify.sanitize(htmlWithoutCssNodes, {
     ALLOWED_TAGS: [
       "a", "abbr", "address", "article", "b", "bdi", "bdo", "blockquote",
       "br", "caption", "center", "cite", "code", "col", "colgroup", "dd", "del",
@@ -138,5 +204,5 @@ export function sanitizeHtml(html: string): string {
     ],
     ALLOW_DATA_ATTR: false,
   });
-  return normalizeLinkAttributes(filterInlineStyles(sanitized));
+  return cssNodes + normalizeLinkAttributes(filterStylesheetLinks(filterInlineStyles(sanitized)));
 }

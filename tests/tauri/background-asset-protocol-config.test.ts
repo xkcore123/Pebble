@@ -16,6 +16,14 @@ describe("background image asset protocol config", () => {
     expect(config.app.security.csp).toContain("http://asset.localhost");
   });
 
+  it("allows unrestricted privacy mode to load remote email stylesheets", () => {
+    const config = JSON.parse(
+      readFileSync(resolve(process.cwd(), "src-tauri", "tauri.conf.json"), "utf8"),
+    );
+
+    expect(config.app.security.csp).toMatch(/style-src[^;]*https:/);
+  });
+
   it("enables the matching tauri protocol-asset cargo feature", () => {
     const cargo = readFileSync(resolve(process.cwd(), "Cargo.toml"), "utf8");
 

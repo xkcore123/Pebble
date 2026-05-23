@@ -73,6 +73,34 @@ describe("sanitizeHtml", () => {
     expect(sanitized).not.toContain("p{color:red}");
   });
 
+  it("preserves backend-approved embedded style tags", () => {
+    const sanitized = sanitizeHtml(
+      '<style>.hero{color:red}</style><p class="hero">Visible body</p>',
+    );
+
+    expect(sanitized).toContain("<style>");
+    expect(sanitized).toContain(".hero{color:red}");
+    expect(sanitized).toContain('class="hero"');
+  });
+
+  it("preserves backend-approved stylesheet links", () => {
+    const sanitized = sanitizeHtml(
+      '<link rel="stylesheet" href="https://cdn.example.com/mail.css"><p>Visible body</p>',
+    );
+
+    expect(sanitized).toContain('rel="stylesheet"');
+    expect(sanitized).toContain('href="https://cdn.example.com/mail.css"');
+  });
+
+  it("removes non-stylesheet link tags", () => {
+    const sanitized = sanitizeHtml(
+      '<link rel="preload" href="https://cdn.example.com/mail.css"><p>Visible body</p>',
+    );
+
+    expect(sanitized).not.toContain("<link");
+    expect(sanitized).toContain("Visible body");
+  });
+
   it("removes inline styles with escaped url tokens", () => {
     const sanitized = sanitizeHtml(
       `<p style="color: u\\72l('https://evil.example/track')">hello</p>`,

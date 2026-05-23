@@ -93,6 +93,26 @@ describe("ShadowDomEmail", () => {
     expect(shadowMarkup).toContain("min-height: 0 !important");
   });
 
+  it("renders approved email CSS inside the shadow content", async () => {
+    const html = `
+      <style>.hero { color: red; }</style>
+      <link rel="stylesheet" href="https://cdn.example.com/mail.css">
+      <p class="hero">Styled body</p>
+    `;
+
+    const { container } = render(<ShadowDomEmail html={html} />);
+    const host = container.firstChild as HTMLDivElement | null;
+
+    await waitFor(() => {
+      expect(host?.shadowRoot?.querySelector(".pebble-email-content")).not.toBeNull();
+    });
+
+    const content = host!.shadowRoot!.querySelector(".pebble-email-content")!;
+    expect(content.querySelector("style")?.textContent).toContain(".hero");
+    expect(content.querySelector("link")?.getAttribute("href")).toBe("https://cdn.example.com/mail.css");
+    expect(content.querySelector(".hero")?.textContent).toBe("Styled body");
+  });
+
   it("opens http and https links through the external URL command", async () => {
     const { container } = render(
       <ShadowDomEmail html={'<a href="http://pebble.byebug.cn/">Pebble</a>'} />,
