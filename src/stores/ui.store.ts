@@ -199,6 +199,12 @@ export const useUIStore = create<UIState>((set) => ({
     }
 
     if (state.activeView === "compose" && view !== "compose") {
+      const composeState = useComposeStore.getState();
+      if (composeState.composeDirty) {
+        useComposeStore.setState({ showComposeLeaveConfirm: true, pendingView: view });
+        return;
+      }
+
       useComposeStore.setState({
         composeMode: null,
         composeReplyTo: null,

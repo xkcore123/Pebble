@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-05-23
+
+### Added
+
+- Added Pebble Web self-hosted edition information to the public site and README documentation.
+- Added Arch Linux AUR installation instructions.
+
+### Changed
+
+- Expanded release automation to build and upload Windows, macOS, and Linux packages from tagged releases.
+- Improved Linux package build handling and form focus-visible styling.
+
+### Fixed
+
+- Added `native-tls` fallback for IMAP TLS and STARTTLS connections when servers only offer DHE cipher suites unsupported by `rustls`, including `imap.sina.cn`.
+- Improved email CSS rendering by preserving embedded styles in relaxed mode and allowing remote stylesheets in unrestricted or trusted-sender modes.
+- Removed an overly strict home-directory check that could block attachment downloads.
+- Hid the compose floating action button while reading message details.
+- Fixed sidebar view switching so repeated navigation cannot get stuck on stale UI state.
+
 ## [0.0.8] - 2026-05-16
 
 ### Added
@@ -181,7 +201,8 @@ This release includes:
 - Windows installers are not code-signed yet, so Windows SmartScreen may show a warning.
 - Outlook support is still experimental and depends on Microsoft Graph permissions configured by the user.
 
-[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.0.8...HEAD
+[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.0.9...HEAD
+[0.0.9]: https://github.com/QingJ01/Pebble/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/QingJ01/Pebble/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/QingJ01/Pebble/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/QingJ01/Pebble/compare/v0.0.5...v0.0.6

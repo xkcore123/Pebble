@@ -197,19 +197,14 @@ impl SmtpSender {
                 let domain = rustls::pki_types::ServerName::try_from(self.host.clone())
                     .map_err(|e| PebbleError::Network(format!("Invalid TLS server name: {e}")))?;
 
-                match connector
-                    .connect(domain, socks_stream.into_inner())
-                    .await
-                {
+                match connector.connect(domain, socks_stream.into_inner()).await {
                     Ok(tls_stream) => {
                         let mut conn = AsyncSmtpConnection::connect_with_transport(
                             Box::new(DebugStream(tls_stream)),
                             &hello_name,
                         )
                         .await
-                        .map_err(|e| {
-                            PebbleError::Network(format!("SMTP handshake failed: {e}"))
-                        })?;
+                        .map_err(|e| PebbleError::Network(format!("SMTP handshake failed: {e}")))?;
                         authenticate_and_send(&mut conn, &self.credentials, email).await?;
                     }
                     Err(rustls_err) => {
@@ -240,9 +235,7 @@ impl SmtpSender {
                             &hello_name,
                         )
                         .await
-                        .map_err(|e| {
-                            PebbleError::Network(format!("SMTP handshake failed: {e}"))
-                        })?;
+                        .map_err(|e| PebbleError::Network(format!("SMTP handshake failed: {e}")))?;
                         authenticate_and_send(&mut conn, &self.credentials, email).await?;
                     }
                 }

@@ -531,9 +531,7 @@ impl ImapProvider {
                 }
                 resp.extend_from_slice(&buf[..n]);
                 let text = String::from_utf8_lossy(&resp);
-                if text.contains("A000 OK")
-                    || text.contains("A000 NO")
-                    || text.contains("A000 BAD")
+                if text.contains("A000 OK") || text.contains("A000 NO") || text.contains("A000 BAD")
                 {
                     break;
                 }
@@ -615,10 +613,7 @@ impl ImapProvider {
         let session: ImapSession = match self.config.security {
             ConnectionSecurity::Tls => {
                 // Implicit TLS — wrap immediately; try rustls, fall back to native-tls
-                debug!(
-                    "Starting TLS handshake with SNI={}",
-                    self.config.host
-                );
+                debug!("Starting TLS handshake with SNI={}", self.config.host);
                 let inner = match tls_connect(&self.config.host, tcp).await {
                     Ok(tls) => InnerStream::Tls(Box::new(tls)),
                     Err(rustls_err) => {
@@ -827,9 +822,8 @@ impl ImapProvider {
                         ));
                     }
                     Ok(Err(rustls_err)) => {
-                        report.push_str(&format!(
-                            "TLS handshake (rustls): FAILED — {rustls_err}\n"
-                        ));
+                        report
+                            .push_str(&format!("TLS handshake (rustls): FAILED — {rustls_err}\n"));
                         let tcp = reconnect_tcp(config).await?;
                         let t_ntls = Instant::now();
                         let mut tls = tokio::time::timeout(
@@ -838,9 +832,7 @@ impl ImapProvider {
                         )
                         .await
                         .map_err(|_| {
-                            PebbleError::Network(
-                                "native-tls handshake timed out (10s)".into(),
-                            )
+                            PebbleError::Network("native-tls handshake timed out (10s)".into())
                         })??;
                         report.push_str(&format!(
                             "TLS handshake (native-tls fallback): OK ({:.0}ms)\n",
@@ -865,9 +857,7 @@ impl ImapProvider {
                         ));
                     }
                     Err(_) => {
-                        return Err(PebbleError::Network(
-                            "TLS handshake timed out (10s)".into(),
-                        ));
+                        return Err(PebbleError::Network("TLS handshake timed out (10s)".into()));
                     }
                 }
             }
@@ -943,9 +933,7 @@ impl ImapProvider {
                             tcp.read(&mut discard),
                         )
                         .await
-                        .map_err(|_| {
-                            PebbleError::Network("Read greeting timed out (10s)".into())
-                        })?
+                        .map_err(|_| PebbleError::Network("Read greeting timed out (10s)".into()))?
                         .map_err(|e| PebbleError::Network(format!("Read greeting: {e}")))?;
                         // Re-send STARTTLS
                         tcp.write_all(b"A001 STARTTLS\r\n")
@@ -973,9 +961,7 @@ impl ImapProvider {
                         )
                         .await
                         .map_err(|_| {
-                            PebbleError::Network(
-                                "native-tls upgrade timed out (10s)".into(),
-                            )
+                            PebbleError::Network("native-tls upgrade timed out (10s)".into())
                         })??;
                         report.push_str(&format!(
                             "TLS upgrade (STARTTLS, native-tls fallback): OK ({:.0}ms)\n",
@@ -983,9 +969,7 @@ impl ImapProvider {
                         ));
                     }
                     Err(_) => {
-                        return Err(PebbleError::Network(
-                            "TLS upgrade timed out (10s)".into(),
-                        ));
+                        return Err(PebbleError::Network("TLS upgrade timed out (10s)".into()));
                     }
                 }
             }
