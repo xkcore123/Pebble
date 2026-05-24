@@ -13,7 +13,7 @@ use crate::commands::oauth::ensure_account_oauth_auth;
 use crate::state::AppState;
 use pebble_core::{FolderRole, Message, PebbleError};
 use pebble_crypto::CryptoService;
-use pebble_mail::{GmailProvider, ImapConfig, ImapProvider, OutlookProvider};
+use pebble_mail::{GmailProvider, ImapConfig, ImapProvider, OutlookProvider, Pop3Config};
 use pebble_search::TantivySearch;
 use pebble_store::Store;
 use serde_json::json;
@@ -224,6 +224,39 @@ pub(super) async fn connect_imap(
     let provider = ImapProvider::new(imap_config);
     provider.connect().await?;
     Ok(provider)
+}
+
+pub(super) fn load_pop3_config(
+    store: &Store,
+    crypto: &CryptoService,
+    account_id: &str,
+) -> std::result::Result<Pop3Config, PebbleError> {
+    let (imap_config, proxy_mode) = if let Some(encrypted) = store.get_auth_data(account_id)? {
+        let decrypted = crypto.decrypt(&encrypted)?;
+        let value: serde_json::Value = serde_json::from_slice(&decrypted)
+            .map_err(|e| PebbleError::Internal(format!("Failed to parse config: {e}")))?;
+        let proxy_mode = account_proxy_mode_from_auth_value(&value);
+        let config: ImapConfig = serde_json::from_value(
+            value.get("imap").cloned().unwrap_or(value.clone()),
+        )
+        .map_err(|e| PebbleError::Internal(format!("Failed to deserialize POP3 config: {e}")))?;
+        (config, proxy_mode)
+    } else {
+        return Err(PebbleError::Internal(format!(
+            "No POP3 config for account {account_id}"
+        )));
+    };
+
+    let proxy = resolve_mail_proxy_from_mode(crypto, store, proxy_mode, imap_config.proxy)?;
+    Ok(Pop3Config {
+        host: imap_config.host,
+        port: imap_config.port,
+        username: imap_config.username,
+        password: imap_config.password,
+        security: imap_config.security,
+        accept_invalid_certs: imap_config.accept_invalid_certs,
+        proxy,
+    })
 }
 
 /// Find the folder with a given role for an account.

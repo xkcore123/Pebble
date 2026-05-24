@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AccountSetup from "../../src/components/AccountSetup";
 import { accountsQueryKey } from "../../src/hooks/queries";
 import {
+  addAccount,
   completeOAuthFlow,
   startSync,
+  testPop3Connection,
 } from "../../src/lib/api";
 
 vi.mock("../../src/lib/i18n", () => ({
@@ -29,6 +31,7 @@ vi.mock("../../src/lib/api", () => ({
   completeOAuthFlow: vi.fn(),
   startSync: vi.fn(),
   testImapConnection: vi.fn(),
+  testPop3Connection: vi.fn(),
 }));
 
 describe("AccountSetup OAuth", () => {
@@ -42,6 +45,15 @@ describe("AccountSetup OAuth", () => {
       updated_at: 1,
     });
     vi.mocked(startSync).mockResolvedValue("started");
+    vi.mocked(addAccount).mockResolvedValue({
+      id: "pop3-account-1",
+      email: "legacy@example.com",
+      display_name: "Legacy",
+      provider: "pop3",
+      created_at: 1,
+      updated_at: 1,
+    });
+    vi.mocked(testPop3Connection).mockResolvedValue("POP3 connection successful (0 messages)");
   });
 
   afterEach(() => {
@@ -128,5 +140,73 @@ describe("AccountSetup OAuth", () => {
 
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog", { name: "Add Email Account" })).toBeTruthy();
+  });
+
+  it("tests and submits manual POP3 account settings", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AccountSetup onClose={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.change(screen.getByLabelText("Email address"), {
+      target: { value: "legacy@example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Display name"), {
+      target: { value: "Legacy" },
+    });
+    fireEvent.change(screen.getByLabelText("Incoming protocol"), {
+      target: { value: "pop3" },
+    });
+    fireEvent.change(screen.getByLabelText("POP3 host"), {
+      target: { value: "pop.example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("SMTP host"), {
+      target: { value: "smtp.example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Username"), {
+      target: { value: "legacy-user" },
+    });
+    fireEvent.change(screen.getByLabelText("Password / App password"), {
+      target: { value: "app-password" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Test Connection" }));
+
+    await waitFor(() => {
+      expect(testPop3Connection).toHaveBeenCalledWith(
+        "pop.example.com",
+        995,
+        "tls",
+        false,
+        undefined,
+        undefined,
+        "legacy-user",
+        "app-password",
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Account & Sync" }));
+
+    await waitFor(() => {
+      expect(addAccount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          email: "legacy@example.com",
+          display_name: "Legacy",
+          provider: "pop3",
+          imap_host: "pop.example.com",
+          imap_port: 995,
+          smtp_host: "smtp.example.com",
+          username: "legacy-user",
+          password: "app-password",
+        }),
+      );
+    });
   });
 });

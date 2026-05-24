@@ -11,7 +11,9 @@ use pebble_core::traits::FolderProvider;
 use pebble_core::{new_id, now_timestamp, Account, HttpProxyConfig, PebbleError, ProviderType};
 use pebble_mail::GmailProvider;
 use pebble_mail::OutlookProvider;
-use pebble_mail::{ConnectionSecurity, ImapConfig, ProxyConfig, SmtpConfig};
+use pebble_mail::{
+    ConnectionSecurity, ImapConfig, Pop3Config, Pop3Provider, ProxyConfig, SmtpConfig,
+};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -297,10 +299,16 @@ pub async fn add_account(
     let provider = match request.provider.to_lowercase().as_str() {
         "gmail" => ProviderType::Gmail,
         "outlook" => ProviderType::Outlook,
+        "pop3" => ProviderType::Pop3,
         _ => ProviderType::Imap,
     };
 
-    validate_connection_security("IMAP", &request.imap_host, &request.imap_security)?;
+    let incoming_label = if provider == ProviderType::Pop3 {
+        "POP3"
+    } else {
+        "IMAP"
+    };
+    validate_connection_security(incoming_label, &request.imap_host, &request.imap_security)?;
     validate_connection_security("SMTP", &request.smtp_host, &request.smtp_security)?;
 
     let existing_accounts = state.store.list_accounts()?;
@@ -359,6 +367,7 @@ pub async fn add_account(
         let provider_slug = match provider {
             ProviderType::Gmail => "gmail",
             ProviderType::Outlook => "outlook",
+            ProviderType::Pop3 => "pop3",
             ProviderType::Imap => "imap",
         };
         state.store.update_sync_state(&account.id, |s| {
@@ -412,6 +421,12 @@ pub async fn update_account(
         return Ok(());
     }
 
+    let provider = state
+        .store
+        .get_account(&account_id)?
+        .map(|account| account.provider)
+        .ok_or_else(|| PebbleError::Internal(format!("Account not found: {account_id}")))?;
+
     // Parse the existing encrypted blob into a typed view. If the row is
     // missing (first-time edit, or a legacy OAuth-only account moving to
     // IMAP), seed a blank template that the mutations below can fill in.
@@ -452,7 +467,8 @@ pub async fn update_account(
         None
     };
 
-    // IMAP side
+    // Incoming side. POP3 accounts reuse the stored IMAP-shaped credential
+    // object for compatibility with existing encrypted account data.
     if let Some(h) = imap_host {
         creds.imap.host = h;
     }
@@ -496,7 +512,7 @@ pub async fn update_account(
     if let Some(accept_invalid_certs) = accept_invalid_certs {
         creds.smtp.accept_invalid_certs = accept_invalid_certs;
     }
-    // Mirror IMAP proxy to SMTP — both connections share the same network path.
+    // Mirror incoming proxy to SMTP; both connections share the same network path.
     if let Some(proxy) = updated_proxy {
         creds.smtp.proxy = proxy;
     }
@@ -504,7 +520,12 @@ pub async fn update_account(
         creds.smtp.username = email.clone();
     }
 
-    validate_connection_security("IMAP", &creds.imap.host, &creds.imap.security)?;
+    let incoming_label = if provider == ProviderType::Pop3 {
+        "POP3"
+    } else {
+        "IMAP"
+    };
+    validate_connection_security(incoming_label, &creds.imap.host, &creds.imap.security)?;
     validate_connection_security("SMTP", &creds.smtp.host, &creds.smtp.security)?;
 
     state
@@ -535,7 +556,7 @@ pub async fn get_account_proxy_setting(
         .store
         .get_account(&account_id)?
         .ok_or_else(|| PebbleError::Internal(format!("Account not found: {account_id}")))?;
-    if account.provider != ProviderType::Imap {
+    if !matches!(account.provider, ProviderType::Imap | ProviderType::Pop3) {
         return Err(PebbleError::UnsupportedProvider(
             "Use the OAuth account proxy commands for Gmail and Outlook accounts".to_string(),
         ));
@@ -592,7 +613,7 @@ pub async fn update_account_proxy_setting(
         .store
         .get_account(&account_id)?
         .ok_or_else(|| PebbleError::Internal(format!("Account not found: {account_id}")))?;
-    if account.provider != ProviderType::Imap {
+    if !matches!(account.provider, ProviderType::Imap | ProviderType::Pop3) {
         return Err(PebbleError::UnsupportedProvider(
             "Use the OAuth account proxy commands for Gmail and Outlook accounts".to_string(),
         ));
@@ -618,6 +639,23 @@ pub struct TestConnectionRequest {
     pub imap_host: String,
     pub imap_port: u16,
     pub imap_security: ConnectionSecurity,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+    #[serde(default)]
+    pub proxy_host: Option<String>,
+    #[serde(default)]
+    pub proxy_port: Option<u16>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TestPop3ConnectionRequest {
+    pub pop3_host: String,
+    pub pop3_port: u16,
+    pub pop3_security: ConnectionSecurity,
     #[serde(default)]
     pub accept_invalid_certs: bool,
     #[serde(default)]
@@ -666,6 +704,42 @@ pub async fn test_imap_connection(
 }
 
 #[tauri::command]
+pub async fn test_pop3_connection(
+    state: State<'_, AppState>,
+    request: TestPop3ConnectionRequest,
+) -> std::result::Result<String, PebbleError> {
+    validate_connection_security("POP3", &request.pop3_host, &request.pop3_security)?;
+
+    let requested_proxy = proxy_config_from_parts(
+        request.proxy_host,
+        request.proxy_port,
+        "Connection test proxy",
+    )?;
+    let proxy = resolve_effective_proxy(
+        requested_proxy,
+        get_global_proxy_raw(&state.crypto, &state.store)?,
+    )
+    .map(mail_proxy_from_http);
+    let username = request.username.unwrap_or_default();
+    let password = request.password.unwrap_or_default();
+    if username.is_empty() || password.is_empty() {
+        return Err(PebbleError::Auth(
+            "POP3 username and password are required for connection test".to_string(),
+        ));
+    }
+    let config = Pop3Config {
+        host: request.pop3_host,
+        port: request.pop3_port,
+        username,
+        password,
+        security: request.pop3_security,
+        accept_invalid_certs: request.accept_invalid_certs,
+        proxy,
+    };
+    Pop3Provider::test_connection(&config).await
+}
+
+#[tauri::command]
 pub async fn test_account_connection(
     state: State<'_, AppState>,
     account_id: String,
@@ -698,6 +772,31 @@ pub async fn test_account_connection(
             "Outlook connection successful ({} folders)",
             folders.len()
         ));
+    }
+
+    if matches!(account.provider, ProviderType::Pop3) {
+        let existing = state
+            .store
+            .get_auth_data(&account_id)?
+            .ok_or_else(|| PebbleError::Internal("No auth data found".into()))?;
+        let decrypted = state.crypto.decrypt(&existing)?;
+        let credentials = deserialize_account_credentials(&decrypted)?;
+        let proxy = resolve_mail_proxy_from_mode(
+            &state.crypto,
+            &state.store,
+            credentials.proxy_mode,
+            credentials.imap.proxy.clone(),
+        )?;
+        let config = Pop3Config {
+            host: credentials.imap.host,
+            port: credentials.imap.port,
+            username: credentials.imap.username,
+            password: credentials.imap.password,
+            security: credentials.imap.security,
+            accept_invalid_certs: credentials.imap.accept_invalid_certs,
+            proxy,
+        };
+        return Pop3Provider::test_connection(&config).await;
     }
 
     let existing = state

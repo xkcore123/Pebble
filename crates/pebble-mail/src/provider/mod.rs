@@ -1,6 +1,7 @@
 pub mod gmail;
 pub mod imap_provider;
 pub mod outlook;
+pub mod pop3_provider;
 
 use std::sync::Arc;
 
@@ -40,6 +41,12 @@ pub async fn create_provider(
             let imap_config: crate::imap::ImapConfig = serde_json::from_value(credentials.clone())
                 .map_err(|e| PebbleError::Auth(format!("Invalid IMAP config: {e}")))?;
             let provider = imap_provider::ImapMailProvider::new(imap_config);
+            Ok(Arc::new(provider))
+        }
+        ProviderType::Pop3 => {
+            let pop3_config: crate::pop3::Pop3Config = serde_json::from_value(credentials.clone())
+                .map_err(|e| PebbleError::Auth(format!("Invalid POP3 config: {e}")))?;
+            let provider = pop3_provider::Pop3MailProvider::new(pop3_config);
             Ok(Arc::new(provider))
         }
         ProviderType::Gmail => {

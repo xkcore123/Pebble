@@ -40,6 +40,7 @@ fn validate_backup_payload_shape(data: &[u8]) -> Result<()> {
 fn provider_slug(provider: &pebble_core::ProviderType) -> &'static str {
     match provider {
         pebble_core::ProviderType::Imap => "imap",
+        pebble_core::ProviderType::Pop3 => "pop3",
         pebble_core::ProviderType::Gmail => "gmail",
         pebble_core::ProviderType::Outlook => "outlook",
     }

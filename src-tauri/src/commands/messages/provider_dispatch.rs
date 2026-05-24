@@ -35,6 +35,9 @@ impl ConnectedProvider {
                 let p = connect_imap(state, account_id).await?;
                 Ok(Self::Imap(p))
             }
+            ProviderType::Pop3 => Err(PebbleError::UnsupportedProvider(
+                "POP3 does not support remote message mutations".to_string(),
+            )),
         }
     }
 

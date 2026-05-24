@@ -105,6 +105,7 @@ describe("useAccountsQuery", () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       "#22c55e",
     );
 
@@ -119,6 +120,7 @@ describe("useAccountsQuery", () => {
       smtpPort: undefined,
       imapSecurity: undefined,
       smtpSecurity: undefined,
+      acceptInvalidCerts: undefined,
       proxyHost: undefined,
       proxyPort: undefined,
       accountColor: "#22c55e",

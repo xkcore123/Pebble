@@ -120,7 +120,8 @@ pub async fn batch_archive(
         let has_remote_archive = archive_folder
             .as_ref()
             .is_some_and(|af| !af.remote_id.starts_with("__local_"));
-        let needs_connection = matches!(provider_type, ProviderType::Gmail) || has_remote_archive;
+        let needs_connection = !matches!(provider_type, ProviderType::Pop3)
+            && (matches!(provider_type, ProviderType::Gmail) || has_remote_archive);
 
         // Track which messages succeeded remotely for this account group
         let mut remote_succeeded: Vec<String> = Vec::new();
@@ -332,6 +333,11 @@ pub async fn batch_delete(
     let mut queued_for_local_commit_ids: Vec<String> = Vec::new();
     // Remote sync: connect once per account, operate, disconnect.
     for (account_id, (provider_type, messages)) in &groups {
+        if matches!(provider_type, ProviderType::Pop3) {
+            deleted_ids.extend(messages.iter().map(|msg| msg.id.clone()));
+            continue;
+        }
+
         match ConnectedProvider::connect(&state, account_id, provider_type).await {
             Ok(conn) => {
                 match &conn {
@@ -523,6 +529,11 @@ pub async fn batch_mark_read(
     let mut queued_for_local_commit_ids: Vec<String> = Vec::new();
     // Remote sync: connect once per account, operate, disconnect.
     for (account_id, (provider_type, messages)) in &groups {
+        if matches!(provider_type, ProviderType::Pop3) {
+            synced_ids.extend(messages.iter().map(|msg| msg.id.clone()));
+            continue;
+        }
+
         match ConnectedProvider::connect(&state, account_id, provider_type).await {
             Ok(conn) => {
                 match &conn {
@@ -667,6 +678,11 @@ pub async fn batch_star(
     let mut queued_for_local_commit_ids: Vec<String> = Vec::new();
     // Remote sync: connect once per account, operate, disconnect.
     for (account_id, (provider_type, messages)) in &groups {
+        if matches!(provider_type, ProviderType::Pop3) {
+            synced_ids.extend(messages.iter().map(|msg| msg.id.clone()));
+            continue;
+        }
+
         match ConnectedProvider::connect(&state, account_id, provider_type).await {
             Ok(conn) => {
                 match &conn {

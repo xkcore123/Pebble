@@ -125,6 +125,7 @@ describe("AccountsTab OAuth proxy", () => {
         undefined,
         undefined,
         undefined,
+        undefined,
         "#22c55e",
       );
     });
@@ -185,6 +186,7 @@ describe("AccountsTab OAuth proxy", () => {
         undefined,
         undefined,
         undefined,
+        undefined,
         "#f97316",
       );
     });
@@ -204,6 +206,7 @@ describe("AccountsTab OAuth proxy", () => {
         "account-1",
         "user@example.com",
         "User",
+        undefined,
         undefined,
         undefined,
         undefined,

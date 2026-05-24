@@ -232,6 +232,7 @@ pub async fn archive_message(
                         }
                     }
                 }
+                ProviderType::Pop3 => RemoteMutationOutcome::LocalOnly,
             }
         };
 
@@ -406,6 +407,7 @@ pub async fn archive_message(
                             }
                         }
                     }
+                    ProviderType::Pop3 => RemoteMutationOutcome::LocalOnly,
                 }
             };
 
@@ -725,6 +727,7 @@ pub async fn delete_message(
                 }
             }
         }
+        ProviderType::Pop3 => RemoteMutationOutcome::LocalOnly,
     };
 
     if !remote_mutation_allows_local_commit(outcome) {
@@ -930,6 +933,7 @@ pub async fn restore_message(
                 }
             }
         }
+        ProviderType::Pop3 => RemoteMutationOutcome::LocalOnly,
     };
 
     if !remote_mutation_allows_local_commit(outcome) {
@@ -991,6 +995,7 @@ pub async fn move_to_folder(
         };
 
     let outcome = match provider_type {
+        ProviderType::Pop3 => RemoteMutationOutcome::LocalOnly,
         ProviderType::Outlook => {
             if is_local_move {
                 RemoteMutationOutcome::LocalOnly

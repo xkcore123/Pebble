@@ -16,6 +16,7 @@ pub struct Account {
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
     Imap,
+    Pop3,
     Gmail,
     Outlook,
 }

@@ -53,6 +53,7 @@ pub async fn update_message_flags(
             match provider_type {
                 Some(ProviderType::Gmail) => Ok(WritebackInfo::Gmail { msg }),
                 Some(ProviderType::Outlook) => Ok(WritebackInfo::Outlook { msg }),
+                Some(ProviderType::Pop3) => Ok(WritebackInfo::None),
                 Some(ProviderType::Imap) | None => {
                     // For IMAP we also need the folder's remote_id and the IMAP
                     // config; both require store / crypto access, so resolve them

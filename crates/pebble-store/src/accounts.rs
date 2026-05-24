@@ -14,7 +14,7 @@ use crate::Store;
 /// read-modify-write cycles don't clobber sibling fields by accident.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SyncState {
-    /// Provider slug as persisted: `"gmail"`, `"outlook"`, or `"imap"`.
+    /// Provider slug as persisted: `"gmail"`, `"outlook"`, `"imap"`, or `"pop3"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
 
@@ -60,6 +60,7 @@ impl SyncState {
 fn provider_to_str(p: &ProviderType) -> &'static str {
     match p {
         ProviderType::Imap => "imap",
+        ProviderType::Pop3 => "pop3",
         ProviderType::Gmail => "gmail",
         ProviderType::Outlook => "outlook",
     }
@@ -67,6 +68,7 @@ fn provider_to_str(p: &ProviderType) -> &'static str {
 
 fn str_to_provider(s: &str) -> ProviderType {
     match s {
+        "pop3" => ProviderType::Pop3,
         "gmail" => ProviderType::Gmail,
         "outlook" => ProviderType::Outlook,
         _ => ProviderType::Imap,

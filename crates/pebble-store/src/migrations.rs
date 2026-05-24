@@ -1,8 +1,8 @@
 use pebble_core::{PebbleError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
 
-const CURRENT_VERSION: u32 = 11;
+const CURRENT_VERSION: u32 = 12;
 const ACCOUNT_COLOR_PRESETS: [&str; 12] = [
     "#0ea5e9", "#22c55e", "#f59e0b", "#8b5cf6", "#f43f5e", "#14b8a6", "#6366f1", "#f97316",
     "#06b6d4", "#ec4899", "#84cc16", "#3b82f6",
@@ -70,6 +70,57 @@ fn backfill_account_colors(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+fn accounts_provider_check_allows_pop3(conn: &Connection) -> Result<bool> {
+    let sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(sql.contains("'pop3'"))
+}
+
+fn rebuild_accounts_with_pop3_provider(conn: &Connection) -> Result<()> {
+    if conn
+        .prepare("SELECT auth_data FROM accounts LIMIT 0")
+        .is_err()
+    {
+        conn.execute_batch("ALTER TABLE accounts ADD COLUMN auth_data BLOB;")
+            .map_err(|e| {
+                PebbleError::Storage(format!("Migration V12 auth_data column failed: {e}"))
+            })?;
+    }
+    if conn
+        .prepare("SELECT sync_state FROM accounts LIMIT 0")
+        .is_err()
+    {
+        conn.execute_batch("ALTER TABLE accounts ADD COLUMN sync_state TEXT;")
+            .map_err(|e| {
+                PebbleError::Storage(format!("Migration V12 sync_state column failed: {e}"))
+            })?;
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE accounts_new (
+            id TEXT PRIMARY KEY,
+            email TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            color TEXT,
+            provider TEXT NOT NULL CHECK(provider IN ('imap', 'pop3', 'gmail', 'outlook')),
+            auth_data BLOB,
+            sync_state TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        INSERT INTO accounts_new (id, email, display_name, color, provider, auth_data, sync_state, created_at, updated_at)
+            SELECT id, email, display_name, color, provider, auth_data, sync_state, created_at, updated_at
+            FROM accounts;
+        DROP TABLE accounts;
+        ALTER TABLE accounts_new RENAME TO accounts;",
+    )
+    .map_err(|e| PebbleError::Storage(format!("Migration V12 failed: {e}")))?;
     Ok(())
 }
 
@@ -285,6 +336,32 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             .map_err(|e| PebbleError::Storage(format!("Migration V11 commit failed: {e}")))?;
     }
 
+    if version < 12 {
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")
+            .map_err(|e| PebbleError::Storage(format!("Migration V12 disable FK failed: {e}")))?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| PebbleError::Storage(format!("Migration V12 begin failed: {e}")))?;
+        if !accounts_provider_check_allows_pop3(&tx)? {
+            rebuild_accounts_with_pop3_provider(&tx)?;
+        }
+        set_schema_version(&tx, CURRENT_VERSION)?;
+        tx.commit()
+            .map_err(|e| PebbleError::Storage(format!("Migration V12 commit failed: {e}")))?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .map_err(|e| PebbleError::Storage(format!("Migration V12 enable FK failed: {e}")))?;
+        let fk_violations: i64 = conn
+            .query_row("PRAGMA foreign_key_check", [], |_| Ok(1))
+            .optional()
+            .map_err(|e| PebbleError::Storage(format!("Migration V12 FK check failed: {e}")))?
+            .unwrap_or(0);
+        if fk_violations != 0 {
+            return Err(PebbleError::Storage(
+                "Migration V12 introduced foreign key violations".to_string(),
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -294,7 +371,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     email TEXT NOT NULL,
     display_name TEXT NOT NULL DEFAULT '',
     color TEXT,
-    provider TEXT NOT NULL CHECK(provider IN ('imap', 'gmail', 'outlook')),
+    provider TEXT NOT NULL CHECK(provider IN ('imap', 'pop3', 'gmail', 'outlook')),
     auth_data BLOB,
     sync_state TEXT,
     created_at INTEGER NOT NULL,
@@ -453,7 +530,7 @@ mod tests {
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, CURRENT_VERSION);
         conn.prepare("SELECT color FROM accounts LIMIT 0")
             .expect("accounts.color should exist after V11");
     }
@@ -492,5 +569,68 @@ mod tests {
             colors,
             vec![Some("#0ea5e9".to_string()), Some("#22c55e".to_string())]
         );
+    }
+
+    #[test]
+    fn migration_v12_allows_pop3_provider_without_breaking_foreign_keys() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+            CREATE TABLE accounts (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                color TEXT,
+                provider TEXT NOT NULL CHECK(provider IN ('imap', 'gmail', 'outlook')),
+                auth_data BLOB,
+                sync_state TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE folders (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                remote_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                folder_type TEXT NOT NULL CHECK(folder_type IN ('folder', 'label', 'category')),
+                role TEXT CHECK(role IN ('inbox', 'sent', 'drafts', 'trash', 'archive', 'spam')),
+                parent_id TEXT,
+                color TEXT,
+                is_system INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO accounts (id, email, display_name, color, provider, created_at, updated_at)
+                VALUES ('account-1', 'one@example.com', 'One', '#0ea5e9', 'imap', 1, 1);
+            INSERT INTO folders (id, account_id, remote_id, name, folder_type, role, is_system, sort_order)
+                VALUES ('folder-1', 'account-1', 'INBOX', 'Inbox', 'folder', 'inbox', 1, 0);
+            PRAGMA user_version = 11;",
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_VERSION);
+        conn.execute(
+            "INSERT INTO accounts (id, email, display_name, provider, created_at, updated_at)
+                VALUES ('account-2', 'two@example.com', 'Two', 'pop3', 2, 2)",
+            [],
+        )
+        .expect("accounts.provider should accept pop3 after V12");
+        let folder_account: String = conn
+            .query_row(
+                "SELECT account_id FROM folders WHERE id = 'folder-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(folder_account, "account-1");
+        let fk_issue = conn
+            .query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+            .optional()
+            .unwrap();
+        assert!(fk_issue.is_none());
     }
 }

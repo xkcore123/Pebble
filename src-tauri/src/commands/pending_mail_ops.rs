@@ -305,6 +305,7 @@ async fn replay_remote_update_flags(
             let _ = imap.disconnect().await;
             result
         }
+        ProviderType::Pop3 => Ok(()),
     }
 }
 
@@ -346,6 +347,7 @@ async fn replay_remote_archive(
             let _ = imap.disconnect().await;
             result
         }
+        ProviderType::Pop3 => Ok(()),
     }
 }
 
@@ -398,6 +400,7 @@ async fn replay_remote_restore(
             let _ = imap.disconnect().await;
             result
         }
+        ProviderType::Pop3 => Ok(()),
     }
 }
 
@@ -456,6 +459,7 @@ async fn replay_remote_delete(
             let _ = imap.disconnect().await;
             result
         }
+        ProviderType::Pop3 => Ok(()),
     }
 }
 
@@ -501,6 +505,7 @@ async fn replay_remote_move_to_folder(
             let _ = imap.disconnect().await;
             result
         }
+        ProviderType::Pop3 => Ok(()),
     }
 }
 
@@ -531,7 +536,9 @@ async fn replay_remote_send(
                 .send_message(&outgoing)
                 .await
         }
-        ProviderType::Imap => compose::send_imap_smtp_message(state, account, &outgoing).await,
+        ProviderType::Imap | ProviderType::Pop3 => {
+            compose::send_imap_smtp_message(state, account, &outgoing).await
+        }
     }
 }
 

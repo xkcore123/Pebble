@@ -583,6 +583,9 @@ fn queue_remote_rule_action(
     let Some(message) = store.get_message(message_id)? else {
         return Ok(false);
     };
+    if account.provider == ProviderType::Pop3 {
+        return Ok(false);
+    }
     let source_folder = store
         .get_message_folder_ids(message_id)?
         .into_iter()
@@ -879,6 +882,25 @@ mod rule_writeback_tests {
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].op_type, "update_flags");
         assert_eq!(ops[0].status, PendingMailOpStatus::Pending);
+    }
+
+    #[test]
+    fn rule_mark_read_for_pop3_account_commits_locally_without_pending_op() {
+        let store = Store::open_in_memory().unwrap();
+        let mut account = test_account();
+        account.provider = ProviderType::Pop3;
+        store.insert_account(&account).unwrap();
+        let folder = test_folder(&account.id);
+        store.insert_folder(&folder).unwrap();
+        let message = test_message(&account.id);
+        store.insert_message(&message, &[folder.id]).unwrap();
+
+        apply_rule_action(&store, &account.id, &message.id, &RuleAction::MarkRead).unwrap();
+
+        let reloaded = store.get_message(&message.id).unwrap().unwrap();
+        assert!(reloaded.is_read);
+        let ops = store.list_pending_mail_ops(&account.id).unwrap();
+        assert!(ops.is_empty());
     }
 
     #[test]

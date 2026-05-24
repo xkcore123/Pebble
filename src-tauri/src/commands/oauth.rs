@@ -288,6 +288,7 @@ fn provider_type(provider: &str) -> Result<ProviderType, PebbleError> {
 pub(crate) fn provider_slug(provider: &ProviderType) -> &'static str {
     match provider {
         ProviderType::Imap => "imap",
+        ProviderType::Pop3 => "pop3",
         ProviderType::Gmail => "gmail",
         ProviderType::Outlook => "outlook",
     }

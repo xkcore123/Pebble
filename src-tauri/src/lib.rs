@@ -455,6 +455,7 @@ pub fn run() {
             commands::accounts::list_accounts,
             commands::accounts::delete_account,
             commands::accounts::test_imap_connection,
+            commands::accounts::test_pop3_connection,
             commands::accounts::test_account_connection,
             commands::folders::list_folders,
             commands::messages::query::list_messages,

@@ -4,7 +4,7 @@ import { useConfirmStore } from "@/stores/confirm.store";
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { addAccount, startSync, testImapConnection, completeOAuthFlow } from "@/lib/api";
+import { addAccount, startSync, testImapConnection, testPop3Connection, completeOAuthFlow } from "@/lib/api";
 import type { AddAccountRequest } from "@/lib/api";
 import { accountsQueryKey } from "@/hooks/queries";
 import { extractErrorMessage } from "@/lib/extractErrorMessage";
@@ -170,16 +170,28 @@ export default function AccountSetup({ onClose }: Props) {
     setTestResult(null);
     setTestLoading(true);
     try {
-      const report = await testImapConnection(
-        form.imap_host,
-        form.imap_port,
-        form.imap_security,
-        form.accept_invalid_certs,
-        form.proxy_host,
-        form.proxy_port,
-        form.username || undefined,
-        form.password || undefined,
-      );
+      const report =
+        form.provider === "pop3"
+          ? await testPop3Connection(
+              form.imap_host,
+              form.imap_port,
+              form.imap_security,
+              form.accept_invalid_certs,
+              form.proxy_host,
+              form.proxy_port,
+              form.username || undefined,
+              form.password || undefined,
+            )
+          : await testImapConnection(
+              form.imap_host,
+              form.imap_port,
+              form.imap_security,
+              form.accept_invalid_certs,
+              form.proxy_host,
+              form.proxy_port,
+              form.username || undefined,
+              form.password || undefined,
+            );
       setTestResult({ ok: true, message: report });
     } catch (err) {
       const msg = extractErrorMessage(err);
@@ -217,7 +229,7 @@ export default function AccountSetup({ onClose }: Props) {
   function applyPreset(key: string) {
     const preset = PRESETS[key];
     if (!preset) return;
-    setForm((prev) => ({ ...prev, ...preset }));
+    setForm((prev) => ({ ...prev, provider: "imap", ...preset }));
   }
 
   function handleChange(field: keyof AddAccountRequest, value: string | number | boolean) {
@@ -229,6 +241,15 @@ export default function AccountSetup({ onClose }: Props) {
       }
       return updated;
     });
+  }
+
+  function handleIncomingProtocolChange(provider: "imap" | "pop3") {
+    setForm((prev) => ({
+      ...prev,
+      provider,
+      imap_port: provider === "pop3" ? 995 : 993,
+      imap_security: "tls",
+    }));
   }
 
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
@@ -262,6 +283,16 @@ export default function AccountSetup({ onClose }: Props) {
     flexDirection: "column",
     gap: "0",
   };
+  const isPop3 = form.provider === "pop3";
+  const incomingHostLabel = isPop3
+    ? t("accountSetup.pop3Host", "POP3 host")
+    : t("accountSetup.imapHost", "IMAP host");
+  const incomingPortLabel = isPop3
+    ? t("accountSetup.pop3Port", "POP3 port")
+    : t("accountSetup.imapPort", "IMAP port");
+  const incomingHostPlaceholder = isPop3 ? "pop.example.com" : "imap.example.com";
+  const canTestConnection =
+    !!form.imap_host && (!isPop3 || (!!form.username && !!form.password));
 
   const proxyFields = (
     <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "12px", marginBottom: "16px" }}>
@@ -482,10 +513,25 @@ export default function AccountSetup({ onClose }: Props) {
               />
             </div>
 
-            {/* IMAP */}
+            {/* Incoming */}
+            <div style={fieldStyle}>
+              <label htmlFor="setup-incoming-protocol" style={labelStyle}>
+                {t("accountSetup.incomingProtocol", "Incoming protocol")}
+              </label>
+              <select
+                id="setup-incoming-protocol"
+                value={isPop3 ? "pop3" : "imap"}
+                onChange={(e) => handleIncomingProtocolChange(e.target.value as "imap" | "pop3")}
+                style={inputStyle}
+              >
+                <option value="imap">{t("accountSetup.incomingProtocolImap", "IMAP")}</option>
+                <option value="pop3">{t("accountSetup.incomingProtocolPop3", "POP3")}</option>
+              </select>
+            </div>
+
             <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "12px" }}>
               <div style={fieldStyle}>
-                <label htmlFor="setup-imap-host" style={labelStyle}>{t("accountSetup.imapHost", "IMAP host")}</label>
+                <label htmlFor="setup-imap-host" style={labelStyle}>{incomingHostLabel}</label>
                 <input
                   id="setup-imap-host"
                   name="imap_host"
@@ -494,11 +540,11 @@ export default function AccountSetup({ onClose }: Props) {
                   required
                   value={form.imap_host}
                   onChange={(e) => handleChange("imap_host", e.target.value)}
-                  placeholder="imap.example.com"
+                  placeholder={incomingHostPlaceholder}
                 />
               </div>
               <div style={fieldStyle}>
-                <label htmlFor="setup-imap-port" style={labelStyle}>{t("accountSetup.imapPort", "IMAP port")}</label>
+                <label htmlFor="setup-imap-port" style={labelStyle}>{incomingPortLabel}</label>
                 <input
                   id="setup-imap-port"
                   name="imap_port"
@@ -519,6 +565,7 @@ export default function AccountSetup({ onClose }: Props) {
                 >
                   <option value="tls">{t("accountSetup.securityTls", "SSL/TLS")}</option>
                   <option value="starttls">{t("accountSetup.securityStarttls", "STARTTLS")}</option>
+                  <option value="plain">{t("accountSetup.securityPlain", "None")}</option>
                 </select>
               </div>
             </div>
@@ -560,6 +607,7 @@ export default function AccountSetup({ onClose }: Props) {
                 >
                   <option value="tls">{t("accountSetup.securityTls", "SSL/TLS")}</option>
                   <option value="starttls">{t("accountSetup.securityStarttls", "STARTTLS")}</option>
+                  <option value="plain">{t("accountSetup.securityPlain", "None")}</option>
                 </select>
               </div>
             </div>
@@ -658,7 +706,7 @@ export default function AccountSetup({ onClose }: Props) {
             <div style={{ display: "flex", gap: "10px", marginTop: "4px" }}>
               <button
                 type="button"
-                disabled={testLoading || !form.imap_host}
+                disabled={testLoading || !canTestConnection}
                 onClick={handleTestConnection}
                 style={{
                   padding: "9px 16px",
@@ -668,8 +716,8 @@ export default function AccountSetup({ onClose }: Props) {
                   color: "var(--color-text-primary)",
                   fontSize: "13px",
                   fontWeight: 500,
-                  cursor: testLoading || !form.imap_host ? "not-allowed" : "pointer",
-                  opacity: testLoading || !form.imap_host ? 0.6 : 1,
+                  cursor: testLoading || !canTestConnection ? "not-allowed" : "pointer",
+                  opacity: testLoading || !canTestConnection ? 0.6 : 1,
                 }}
               >
                 {testLoading ? t("accountSetup.testing", "Testing...") : t("accountSetup.testConnection", "Test Connection")}

@@ -180,6 +180,30 @@ export async function testImapConnection(
   });
 }
 
+export async function testPop3Connection(
+  pop3Host: string,
+  pop3Port: number,
+  pop3Security: ConnectionSecurity,
+  acceptInvalidCerts?: boolean,
+  proxyHost?: string,
+  proxyPort?: number,
+  username?: string,
+  password?: string,
+): Promise<string> {
+  return invoke<string>("test_pop3_connection", {
+    request: {
+      pop3_host: pop3Host,
+      pop3_port: pop3Port,
+      pop3_security: pop3Security,
+      accept_invalid_certs: acceptInvalidCerts,
+      proxy_host: proxyHost,
+      proxy_port: proxyPort,
+      username,
+      password,
+    },
+  });
+}
+
 export async function listAccounts(): Promise<Account[]> {
   return invoke<Account[]>("list_accounts");
 }

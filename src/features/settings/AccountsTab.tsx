@@ -412,6 +412,13 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isOAuth = account.provider === "gmail" || account.provider === "outlook";
+  const isPop3 = account.provider === "pop3";
+  const incomingHostLabel = isPop3
+    ? t("accountSetup.pop3Host", "POP3 host")
+    : t("accountSetup.imapHost", "IMAP host");
+  const incomingPortLabel = isPop3
+    ? t("accountSetup.pop3Port", "POP3 port")
+    : t("accountSetup.imapPort", "IMAP port");
 
   useEffect(() => {
     let cancelled = false;
@@ -714,12 +721,12 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "12px" }}>
                   <div style={fieldStyle}>
-                    <label style={labelStyle}>{t("accountSetup.imapHost")} <span style={{ color: "var(--color-text-secondary)", fontWeight: 400 }}>({t("settings.optional", "optional")})</span></label>
-                    <input aria-label={t("accountSetup.imapHost")} style={inputStyle} type="text" value={imapHost} onChange={(e) => setImapHost(e.target.value)} placeholder={t("settings.leaveEmptyKeep")} />
+                    <label style={labelStyle}>{incomingHostLabel} <span style={{ color: "var(--color-text-secondary)", fontWeight: 400 }}>({t("settings.optional", "optional")})</span></label>
+                    <input aria-label={incomingHostLabel} style={inputStyle} type="text" value={imapHost} onChange={(e) => setImapHost(e.target.value)} placeholder={t("settings.leaveEmptyKeep")} />
                   </div>
                   <div style={fieldStyle}>
-                    <label style={labelStyle}>{t("accountSetup.imapPort")}</label>
-                    <input aria-label={t("accountSetup.imapPort")} style={{ ...inputStyle, width: "70px" }} type="number" value={imapPort} onChange={(e) => setImapPort(e.target.value)} />
+                    <label style={labelStyle}>{incomingPortLabel}</label>
+                    <input aria-label={incomingPortLabel} style={{ ...inputStyle, width: "70px" }} type="number" value={imapPort} onChange={(e) => setImapPort(e.target.value)} />
                   </div>
                   <div style={fieldStyle}>
                     <label htmlFor="accountsetup-imap-security" style={labelStyle}>{t("accountSetup.security", "Security")}</label>
@@ -727,6 +734,7 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
                       <option value="">{t("settings.leaveEmptyKeep", "keep current")}</option>
                       <option value="tls">{t("accountSetup.securityTls", "SSL/TLS")}</option>
                       <option value="starttls">{t("accountSetup.securityStarttls", "STARTTLS")}</option>
+                      <option value="plain">{t("accountSetup.securityPlain", "None")}</option>
                     </select>
                   </div>
                 </div>
@@ -746,6 +754,7 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
                       <option value="">{t("settings.leaveEmptyKeep", "keep current")}</option>
                       <option value="tls">{t("accountSetup.securityTls", "SSL/TLS")}</option>
                       <option value="starttls">{t("accountSetup.securityStarttls", "STARTTLS")}</option>
+                      <option value="plain">{t("accountSetup.securityPlain", "None")}</option>
                     </select>
                   </div>
                 </div>

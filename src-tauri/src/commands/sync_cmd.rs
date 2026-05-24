@@ -9,7 +9,7 @@ use crate::state::{AppState, SyncHandle};
 use pebble_core::{PebbleError, ProviderType};
 use pebble_mail::{
     GmailProvider, GmailSyncWorker, ImapMailProvider, OutlookProvider, OutlookSyncWorker,
-    SyncConfig, SyncRuntimeStatus, SyncWorker,
+    Pop3Provider, Pop3SyncWorker, SyncConfig, SyncRuntimeStatus, SyncWorker,
 };
 use pebble_store::Store;
 use std::collections::HashSet;
@@ -216,6 +216,7 @@ async fn start_sync_inner(
 fn provider_slug(provider: &ProviderType) -> &'static str {
     match provider {
         ProviderType::Imap => "imap",
+        ProviderType::Pop3 => "pop3",
         ProviderType::Gmail => "gmail",
         ProviderType::Outlook => "outlook",
     }
@@ -520,6 +521,68 @@ fn build_sync_task(
                     "Outlook sync task completed for account {}",
                     account_id_clone
                 );
+            })
+        }
+        ProviderType::Pop3 => {
+            let pop3_config = match crate::commands::messages::load_pop3_config(
+                &state.store,
+                &state.crypto,
+                &account_id_clone,
+            ) {
+                Ok(config) => config,
+                Err(e) => {
+                    emit_realtime_status(
+                        &app_for_progress,
+                        realtime_status_payload(
+                            &account_id_clone,
+                            &ProviderType::Pop3,
+                            RealtimeMode::Error,
+                            None,
+                            None,
+                            Some(e.to_string()),
+                        ),
+                    );
+                    return Err(e);
+                }
+            };
+
+            let provider = Arc::new(Pop3Provider::new(pop3_config));
+            tokio::spawn(async move {
+                let mut config = SyncConfig::default();
+                if let Some(interval) = poll_interval_secs {
+                    config.poll_interval_secs = interval;
+                }
+                emit_realtime_status(
+                    &app_for_progress,
+                    realtime_status_payload(
+                        &account_id_for_progress,
+                        &ProviderType::Pop3,
+                        if config.manual_only() {
+                            RealtimeMode::Manual
+                        } else {
+                            RealtimeMode::Polling
+                        },
+                        Some(now_timestamp_secs()),
+                        None,
+                        Some(polling_status_message(&config)),
+                    ),
+                );
+                let worker = Pop3SyncWorker::new(
+                    account_id_clone.clone(),
+                    provider,
+                    store,
+                    stop_rx,
+                    attachments_dir,
+                )
+                .with_error_tx(error_tx)
+                .with_message_tx(message_tx)
+                .with_progress_tx(progress_tx);
+                worker.run(config, Some(trigger_rx)).await;
+                let _ = app_for_progress.emit(
+                    events::MAIL_SYNC_COMPLETE,
+                    serde_json::json!({ "account_id": &account_id_for_progress }),
+                );
+                info!("POP3 sync task completed for account {}", account_id_clone);
             })
         }
         ProviderType::Imap => {
