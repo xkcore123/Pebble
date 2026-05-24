@@ -47,6 +47,8 @@ struct StoredMailConfig {
     security: Option<ConnectionSecurity>,
     #[serde(default)]
     use_tls: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    accept_invalid_certs: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     proxy: Option<ProxyConfig>,
 }
@@ -67,6 +69,7 @@ impl StoredMailConfig {
             username: self.username,
             password: self.password,
             security,
+            accept_invalid_certs: self.accept_invalid_certs,
             proxy: self.proxy,
         }
     }
@@ -79,6 +82,7 @@ impl StoredMailConfig {
             username: self.username,
             password: self.password,
             security,
+            accept_invalid_certs: self.accept_invalid_certs,
             proxy: self.proxy,
         }
     }
@@ -93,6 +97,7 @@ impl From<&ImapConfig> for StoredMailConfig {
             password: value.password.clone(),
             security: Some(value.security.clone()),
             use_tls: None,
+            accept_invalid_certs: value.accept_invalid_certs,
             proxy: value.proxy.clone(),
         }
     }
@@ -107,9 +112,14 @@ impl From<&SmtpConfig> for StoredMailConfig {
             password: value.password.clone(),
             security: Some(value.security.clone()),
             use_tls: None,
+            accept_invalid_certs: value.accept_invalid_certs,
             proxy: value.proxy.clone(),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl From<&AccountCredentials> for StoredAccountCredentials {
@@ -261,6 +271,8 @@ pub struct AddAccountRequest {
     pub imap_security: ConnectionSecurity,
     pub smtp_security: ConnectionSecurity,
     #[serde(default)]
+    pub accept_invalid_certs: bool,
+    #[serde(default)]
     pub proxy_host: Option<String>,
     #[serde(default)]
     pub proxy_port: Option<u16>,
@@ -324,6 +336,7 @@ pub async fn add_account(
                 username: request.username.clone(),
                 password: request.password.clone(),
                 security: request.imap_security,
+                accept_invalid_certs: request.accept_invalid_certs,
                 proxy: proxy.clone(),
             },
             smtp: SmtpConfig {
@@ -332,6 +345,7 @@ pub async fn add_account(
                 username: request.username,
                 password: request.password,
                 security: request.smtp_security,
+                accept_invalid_certs: request.accept_invalid_certs,
                 proxy,
             },
         };
@@ -374,6 +388,7 @@ pub async fn update_account(
     smtp_port: Option<u16>,
     imap_security: Option<ConnectionSecurity>,
     smtp_security: Option<ConnectionSecurity>,
+    accept_invalid_certs: Option<bool>,
     proxy_host: Option<String>,
     proxy_port: Option<u16>,
     account_color: Option<String>,
@@ -387,6 +402,7 @@ pub async fn update_account(
         || smtp_port.is_some()
         || imap_security.is_some()
         || smtp_security.is_some()
+        || accept_invalid_certs.is_some()
         || proxy_host.is_some()
         || proxy_port.is_some();
     if !credentials_dirty {
@@ -412,6 +428,7 @@ pub async fn update_account(
                 username: String::new(),
                 password: String::new(),
                 security: ConnectionSecurity::default(),
+                accept_invalid_certs: false,
                 proxy: None,
             },
             smtp: SmtpConfig {
@@ -420,6 +437,7 @@ pub async fn update_account(
                 username: String::new(),
                 password: String::new(),
                 security: ConnectionSecurity::default(),
+                accept_invalid_certs: false,
                 proxy: None,
             },
         },
@@ -447,6 +465,9 @@ pub async fn update_account(
     if let Some(sec) = imap_security {
         creds.imap.security = sec;
     }
+    if let Some(accept_invalid_certs) = accept_invalid_certs {
+        creds.imap.accept_invalid_certs = accept_invalid_certs;
+    }
     if let Some(proxy) = &updated_proxy {
         creds.proxy_mode = if proxy.is_some() {
             AccountProxyMode::Custom
@@ -471,6 +492,9 @@ pub async fn update_account(
     }
     if let Some(sec) = smtp_security {
         creds.smtp.security = sec;
+    }
+    if let Some(accept_invalid_certs) = accept_invalid_certs {
+        creds.smtp.accept_invalid_certs = accept_invalid_certs;
     }
     // Mirror IMAP proxy to SMTP — both connections share the same network path.
     if let Some(proxy) = updated_proxy {
@@ -595,6 +619,8 @@ pub struct TestConnectionRequest {
     pub imap_port: u16,
     pub imap_security: ConnectionSecurity,
     #[serde(default)]
+    pub accept_invalid_certs: bool,
+    #[serde(default)]
     pub proxy_host: Option<String>,
     #[serde(default)]
     pub proxy_port: Option<u16>,
@@ -629,6 +655,7 @@ pub async fn test_imap_connection(
         username: request.username.unwrap_or_default(),
         password: request.password.unwrap_or_default(),
         security: request.imap_security,
+        accept_invalid_certs: request.accept_invalid_certs,
         proxy,
     };
     if has_credentials {
@@ -780,6 +807,7 @@ mod tests {
                 username: "user@example.com".to_string(),
                 password: "imap-secret".to_string(),
                 security: ConnectionSecurity::Tls,
+                accept_invalid_certs: true,
                 proxy: None,
             },
             smtp: SmtpConfig {
@@ -788,6 +816,7 @@ mod tests {
                 username: "user@example.com".to_string(),
                 password: "smtp-secret".to_string(),
                 security: ConnectionSecurity::Tls,
+                accept_invalid_certs: true,
                 proxy: None,
             },
         };
@@ -797,6 +826,8 @@ mod tests {
 
         assert_eq!(decoded.imap.password, "imap-secret");
         assert_eq!(decoded.smtp.password, "smtp-secret");
+        assert!(decoded.imap.accept_invalid_certs);
+        assert!(decoded.smtp.accept_invalid_certs);
     }
 
     #[test]
@@ -809,6 +840,7 @@ mod tests {
                 username: "user@example.com".to_string(),
                 password: "imap-secret".to_string(),
                 security: ConnectionSecurity::Tls,
+                accept_invalid_certs: false,
                 proxy: Some(ProxyConfig {
                     host: "127.0.0.1".to_string(),
                     port: 7890,
@@ -820,6 +852,7 @@ mod tests {
                 username: "user@example.com".to_string(),
                 password: "smtp-secret".to_string(),
                 security: ConnectionSecurity::Tls,
+                accept_invalid_certs: false,
                 proxy: None,
             },
         };
@@ -840,6 +873,7 @@ mod tests {
                 username: "user@example.com".to_string(),
                 password: "imap-secret".to_string(),
                 security: ConnectionSecurity::Tls,
+                accept_invalid_certs: false,
                 proxy: None,
             },
             smtp: SmtpConfig {
@@ -848,6 +882,7 @@ mod tests {
                 username: "user@example.com".to_string(),
                 password: "smtp-secret".to_string(),
                 security: ConnectionSecurity::Tls,
+                accept_invalid_certs: false,
                 proxy: None,
             },
         };

@@ -404,6 +404,7 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
   const [smtpPort, setSmtpPort] = useState("");
   const [imapSecurity, setImapSecurity] = useState<ConnectionSecurity | "">("");
   const [smtpSecurity, setSmtpSecurity] = useState<ConnectionSecurity | "">("");
+  const [acceptInvalidCerts, setAcceptInvalidCerts] = useState<"" | "false" | "true">("");
   const [oauthProxyMode, setOauthProxyMode] = useState<AccountProxyMode>("inherit");
   const [proxyHost, setProxyHost] = useState("");
   const [proxyPort, setProxyPort] = useState("");
@@ -499,6 +500,7 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
           undefined,
           undefined,
           undefined,
+          undefined,
           accountColor,
         );
         const trimmedProxyHost = proxyHost.trim();
@@ -527,6 +529,7 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
           smtpPort ? parseInt(smtpPort, 10) : undefined,
           imapSecurity || undefined,
           smtpSecurity || undefined,
+          acceptInvalidCerts === "" ? undefined : acceptInvalidCerts === "true",
           proxyHost.trim() || undefined,
           proxyPort ? parseInt(proxyPort, 10) : undefined,
           accountColor,
@@ -745,6 +748,22 @@ function EditAccountModal({ account, initialColor, onClose, onSaved }: {
                       <option value="starttls">{t("accountSetup.securityStarttls", "STARTTLS")}</option>
                     </select>
                   </div>
+                </div>
+
+                <div style={fieldStyle}>
+                  <label htmlFor="accountsetup-cert-policy" style={labelStyle}>
+                    {t("accountSetup.tlsCertificateVerification", "TLS certificate verification")}
+                  </label>
+                  <select
+                    id="accountsetup-cert-policy"
+                    value={acceptInvalidCerts}
+                    onChange={(e) => setAcceptInvalidCerts(e.target.value as "" | "false" | "true")}
+                    style={inputStyle}
+                  >
+                    <option value="">{t("settings.leaveEmptyKeep", "keep current")}</option>
+                    <option value="false">{t("accountSetup.verifyTlsCerts", "Verify certificates")}</option>
+                    <option value="true">{t("accountSetup.acceptInvalidCerts", "Allow invalid TLS certificates")}</option>
+                  </select>
                 </div>
 
               </>

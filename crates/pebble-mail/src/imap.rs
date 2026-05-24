@@ -16,6 +16,14 @@ use tokio_native_tls as async_native_tls;
 use tokio_rustls::client::TlsStream;
 use tracing::debug;
 
+use rustls::{
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    server::ParsedCertificate,
+    DigitallySignedStruct, Error as TlsError, SignatureScheme,
+};
+
 /// Connection security mode for mail protocols.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +54,8 @@ pub struct ImapConfig {
     #[serde(skip_serializing)]
     pub password: String,
     pub security: ConnectionSecurity,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub accept_invalid_certs: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
 }
@@ -58,6 +68,7 @@ impl std::fmt::Debug for ImapConfig {
             .field("username", &self.username)
             .field("password", &"[REDACTED]")
             .field("security", &self.security)
+            .field("accept_invalid_certs", &self.accept_invalid_certs)
             .field("proxy", &self.proxy)
             .finish()
     }
@@ -80,6 +91,8 @@ impl<'de> serde::Deserialize<'de> for ImapConfig {
             #[serde(default)]
             use_tls: Option<bool>,
             #[serde(default)]
+            accept_invalid_certs: bool,
+            #[serde(default)]
             proxy: Option<ProxyConfig>,
         }
 
@@ -95,6 +108,7 @@ impl<'de> serde::Deserialize<'de> for ImapConfig {
             username: raw.username,
             password: raw.password,
             security,
+            accept_invalid_certs: raw.accept_invalid_certs,
             proxy: raw.proxy,
         })
     }
@@ -109,6 +123,8 @@ pub struct SmtpConfig {
     #[serde(skip_serializing)]
     pub password: String,
     pub security: ConnectionSecurity,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub accept_invalid_certs: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
 }
@@ -121,6 +137,7 @@ impl std::fmt::Debug for SmtpConfig {
             .field("username", &self.username)
             .field("password", &"[REDACTED]")
             .field("security", &self.security)
+            .field("accept_invalid_certs", &self.accept_invalid_certs)
             .field("proxy", &self.proxy)
             .finish()
     }
@@ -143,6 +160,8 @@ impl<'de> serde::Deserialize<'de> for SmtpConfig {
             #[serde(default)]
             use_tls: Option<bool>,
             #[serde(default)]
+            accept_invalid_certs: bool,
+            #[serde(default)]
             proxy: Option<ProxyConfig>,
         }
 
@@ -158,9 +177,14 @@ impl<'de> serde::Deserialize<'de> for SmtpConfig {
             username: raw.username,
             password: raw.password,
             security,
+            accept_invalid_certs: raw.accept_invalid_certs,
             proxy: raw.proxy,
         })
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Stream wrapper that replays buffered prefix bytes, then delegates to inner.
@@ -317,21 +341,36 @@ pub struct ImapProvider {
 }
 
 /// Build a rustls TLS connector with bundled root certificates.
-fn build_tls_connector() -> Result<tokio_rustls::TlsConnector> {
+fn build_tls_connector(accept_invalid_certs: bool) -> Result<tokio_rustls::TlsConnector> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
-        .map_err(|e| PebbleError::Network(format!("TLS protocol versions: {e}")))?
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+        .map_err(|e| PebbleError::Network(format!("TLS protocol versions: {e}")))?;
+    let config = if accept_invalid_certs {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptInvalidCertsVerifier {
+                roots: root_store,
+                provider,
+            }))
+            .with_no_client_auth()
+    } else {
+        builder
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
     Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }
 
 /// Perform a TLS handshake using rustls on the given TCP stream.
-async fn tls_connect(host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>> {
-    let connector = build_tls_connector()?;
+async fn tls_connect(
+    host: &str,
+    tcp: TcpStream,
+    accept_invalid_certs: bool,
+) -> Result<TlsStream<TcpStream>> {
+    let connector = build_tls_connector(accept_invalid_certs)?;
     let server_name = rustls::pki_types::ServerName::try_from(host)
         .map_err(|e| PebbleError::Network(format!("Invalid server name '{}': {}", host, e)))?
         .to_owned();
@@ -344,8 +383,16 @@ async fn tls_connect(host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>>
 }
 
 /// Build a native-tls connector (delegates to OS TLS: SChannel/SecureTransport/OpenSSL).
-fn build_native_tls_connector() -> Result<async_native_tls::TlsConnector> {
-    let connector = native_tls::TlsConnector::new()
+fn build_native_tls_connector(
+    accept_invalid_certs: bool,
+) -> Result<async_native_tls::TlsConnector> {
+    let mut builder = native_tls::TlsConnector::builder();
+    if accept_invalid_certs {
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+    }
+    let connector = builder
+        .build()
         .map_err(|e| PebbleError::Network(format!("native-tls init: {e}")))?;
     Ok(async_native_tls::TlsConnector::from(connector))
 }
@@ -355,14 +402,89 @@ fn build_native_tls_connector() -> Result<async_native_tls::TlsConnector> {
 async fn native_tls_connect(
     host: &str,
     tcp: TcpStream,
+    accept_invalid_certs: bool,
 ) -> Result<async_native_tls::TlsStream<TcpStream>> {
-    let connector = build_native_tls_connector()?;
+    let connector = build_native_tls_connector(accept_invalid_certs)?;
     with_imap_timeout(
         &format!("TLS handshake (native-tls) with {host}"),
         IMAP_CONNECT_TIMEOUT_SECS,
         connector.connect(host, tcp),
     )
     .await
+}
+
+#[derive(Debug)]
+pub(crate) struct AcceptInvalidCertsVerifier {
+    roots: rustls::RootCertStore,
+    provider: Arc<CryptoProvider>,
+}
+
+impl AcceptInvalidCertsVerifier {
+    pub(crate) fn new(roots: rustls::RootCertStore) -> Self {
+        Self {
+            roots,
+            provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        }
+    }
+}
+
+impl ServerCertVerifier for AcceptInvalidCertsVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, TlsError> {
+        if !self.roots.is_empty() {
+            if let Ok(cert) = ParsedCertificate::try_from(end_entity) {
+                let _ = rustls::client::verify_server_cert_signed_by_trust_anchor(
+                    &cert,
+                    &self.roots,
+                    intermediates,
+                    now,
+                    self.provider.signature_verification_algorithms.all,
+                );
+                let _ = rustls::client::verify_server_name(&cert, server_name);
+            }
+        }
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 impl ImapProvider {
@@ -544,10 +666,11 @@ impl ImapProvider {
 
         // TLS upgrade
         let inner = if use_native_tls {
-            let tls = native_tls_connect(&self.config.host, tcp).await?;
+            let tls = native_tls_connect(&self.config.host, tcp, self.config.accept_invalid_certs)
+                .await?;
             InnerStream::NativeTls(Box::new(tls))
         } else {
-            let tls = tls_connect(&self.config.host, tcp).await?;
+            let tls = tls_connect(&self.config.host, tcp, self.config.accept_invalid_certs).await?;
             InnerStream::Tls(Box::new(tls))
         };
 
@@ -614,7 +737,13 @@ impl ImapProvider {
             ConnectionSecurity::Tls => {
                 // Implicit TLS — wrap immediately; try rustls, fall back to native-tls
                 debug!("Starting TLS handshake with SNI={}", self.config.host);
-                let inner = match tls_connect(&self.config.host, tcp).await {
+                let inner = match tls_connect(
+                    &self.config.host,
+                    tcp,
+                    self.config.accept_invalid_certs,
+                )
+                .await
+                {
                     Ok(tls) => InnerStream::Tls(Box::new(tls)),
                     Err(rustls_err) => {
                         debug!(
@@ -622,7 +751,11 @@ impl ImapProvider {
                             rustls_err
                         );
                         let tcp = self.tcp_connect().await?;
-                        let tls = native_tls_connect(&self.config.host, tcp)
+                        let tls = native_tls_connect(
+                            &self.config.host,
+                            tcp,
+                            self.config.accept_invalid_certs,
+                        )
                             .await
                             .map_err(|e| {
                                 PebbleError::Network(format!(
@@ -794,7 +927,7 @@ impl ImapProvider {
                 let t1 = Instant::now();
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    tls_connect(&config.host, tcp),
+                    tls_connect(&config.host, tcp, config.accept_invalid_certs),
                 )
                 .await
                 {
@@ -828,7 +961,7 @@ impl ImapProvider {
                         let t_ntls = Instant::now();
                         let mut tls = tokio::time::timeout(
                             std::time::Duration::from_secs(10),
-                            native_tls_connect(&config.host, tcp),
+                            native_tls_connect(&config.host, tcp, config.accept_invalid_certs),
                         )
                         .await
                         .map_err(|_| {
@@ -909,7 +1042,7 @@ impl ImapProvider {
                 let t3 = Instant::now();
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    tls_connect(&config.host, tcp),
+                    tls_connect(&config.host, tcp, config.accept_invalid_certs),
                 )
                 .await
                 {
@@ -957,7 +1090,7 @@ impl ImapProvider {
                         let t4 = Instant::now();
                         tokio::time::timeout(
                             std::time::Duration::from_secs(10),
-                            native_tls_connect(&config.host, tcp),
+                            native_tls_connect(&config.host, tcp, config.accept_invalid_certs),
                         )
                         .await
                         .map_err(|_| {
@@ -1741,16 +1874,49 @@ pub fn folder_sort_order(role: &Option<FolderRole>) -> i32 {
 
 #[cfg(test)]
 mod tls_config_tests {
-    use super::{build_native_tls_connector, build_tls_connector, imap_timeout_error};
+    use super::{
+        build_native_tls_connector, build_tls_connector, imap_timeout_error, ImapConfig, SmtpConfig,
+    };
 
     #[test]
     fn build_tls_connector_returns_result() {
-        assert!(build_tls_connector().is_ok());
+        assert!(build_tls_connector(false).is_ok());
+        assert!(build_tls_connector(true).is_ok());
     }
 
     #[test]
     fn build_native_tls_connector_returns_result() {
-        assert!(build_native_tls_connector().is_ok());
+        assert!(build_native_tls_connector(false).is_ok());
+        assert!(build_native_tls_connector(true).is_ok());
+    }
+
+    #[test]
+    fn imap_config_defaults_to_certificate_verification() {
+        let config: ImapConfig = serde_json::from_value(serde_json::json!({
+            "host": "mail.example.com",
+            "port": 993,
+            "username": "user",
+            "password": "secret",
+            "security": "tls"
+        }))
+        .unwrap();
+
+        assert!(!config.accept_invalid_certs);
+    }
+
+    #[test]
+    fn smtp_config_preserves_invalid_certificate_override() {
+        let config: SmtpConfig = serde_json::from_value(serde_json::json!({
+            "host": "mail.example.com",
+            "port": 465,
+            "username": "user",
+            "password": "secret",
+            "security": "tls",
+            "accept_invalid_certs": true
+        }))
+        .unwrap();
+
+        assert!(config.accept_invalid_certs);
     }
 
     #[test]

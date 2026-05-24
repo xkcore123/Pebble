@@ -2,7 +2,7 @@ use crate::imap::{ConnectionSecurity, ProxyConfig};
 use lettre::message::header::ContentType;
 use lettre::message::{Attachment, Body, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
-use lettre::transport::smtp::client::{AsyncSmtpConnection, AsyncTokioStream, TlsParameters};
+use lettre::transport::smtp::client::{AsyncSmtpConnection, AsyncTokioStream, Tls, TlsParameters};
 use lettre::transport::smtp::extension::ClientId;
 use lettre::{AsyncSmtpTransport, AsyncTransport};
 use pebble_core::{PebbleError, Result};
@@ -17,6 +17,7 @@ pub struct SmtpSender {
     port: u16,
     credentials: Credentials,
     security: ConnectionSecurity,
+    accept_invalid_certs: bool,
     proxy: Option<ProxyConfig>,
 }
 
@@ -27,6 +28,7 @@ impl SmtpSender {
         username: String,
         password: String,
         security: ConnectionSecurity,
+        accept_invalid_certs: bool,
         proxy: Option<ProxyConfig>,
     ) -> Self {
         Self {
@@ -34,6 +36,7 @@ impl SmtpSender {
             port,
             credentials: Credentials::new(username, password),
             security,
+            accept_invalid_certs,
             proxy,
         }
     }
@@ -143,23 +146,25 @@ impl SmtpSender {
 
     /// Send without a proxy using the standard lettre AsyncSmtpTransport.
     async fn send_direct(&self, email: &lettre::Message) -> Result<()> {
+        let tls_parameters = || smtp_tls_parameters(&self.host, self.accept_invalid_certs);
         let transport = match self.security {
             ConnectionSecurity::Tls => {
-                AsyncSmtpTransport::<lettre::Tokio1Executor>::relay(&self.host)
-                    .map_err(|e| PebbleError::Network(format!("SMTP relay error: {e}")))?
+                AsyncSmtpTransport::<lettre::Tokio1Executor>::builder_dangerous(&self.host)
+                    .tls(Tls::Wrapper(tls_parameters()?))
                     .port(self.port)
                     .credentials(self.credentials.clone())
                     .build()
             }
             ConnectionSecurity::StartTls => {
-                AsyncSmtpTransport::<lettre::Tokio1Executor>::starttls_relay(&self.host)
-                    .map_err(|e| PebbleError::Network(format!("SMTP STARTTLS error: {e}")))?
+                AsyncSmtpTransport::<lettre::Tokio1Executor>::builder_dangerous(&self.host)
+                    .tls(Tls::Required(tls_parameters()?))
                     .port(self.port)
                     .credentials(self.credentials.clone())
                     .build()
             }
             ConnectionSecurity::Plain => {
                 AsyncSmtpTransport::<lettre::Tokio1Executor>::builder_dangerous(&self.host)
+                    .tls(Tls::None)
                     .port(self.port)
                     .credentials(self.credentials.clone())
                     .build()
@@ -192,10 +197,11 @@ impl SmtpSender {
                         .map_err(|e| PebbleError::Network(format!("SOCKS5 connect failed: {e}")))?;
 
                 // Try rustls first, fall back to native-tls if handshake fails
-                let rustls_config = build_rustls_client_config()?;
+                let rustls_config = build_rustls_client_config(self.accept_invalid_certs)?;
                 let connector = tokio_rustls::TlsConnector::from(rustls_config);
                 let domain = rustls::pki_types::ServerName::try_from(self.host.clone())
-                    .map_err(|e| PebbleError::Network(format!("Invalid TLS server name: {e}")))?;
+                    .map_err(|e| PebbleError::Network(format!("Invalid TLS server name: {e}")))?
+                    .to_owned();
 
                 match connector.connect(domain, socks_stream.into_inner()).await {
                     Ok(tls_stream) => {
@@ -221,7 +227,8 @@ impl SmtpSender {
                         .map_err(|e| {
                             PebbleError::Network(format!("SOCKS5 reconnect failed: {e}"))
                         })?;
-                        let native_connector = build_native_tls_connector()?;
+                        let native_connector =
+                            build_native_tls_connector(self.accept_invalid_certs)?;
                         let tls_stream = native_connector
                             .connect(&self.host, socks_stream.into_inner())
                             .await
@@ -258,8 +265,7 @@ impl SmtpSender {
                         "STARTTLS required but server does not support it — refusing to send in plaintext".to_string(),
                     ));
                 }
-                let tls_params = TlsParameters::new(self.host.clone())
-                    .map_err(|e| PebbleError::Network(format!("TLS parameters error: {e}")))?;
+                let tls_params = smtp_tls_parameters(&self.host, self.accept_invalid_certs)?;
                 conn.starttls(tls_params, &hello_name)
                     .await
                     .map_err(|e| PebbleError::Network(format!("STARTTLS failed: {e}")))?;
@@ -287,6 +293,14 @@ impl SmtpSender {
     }
 }
 
+fn smtp_tls_parameters(host: &str, accept_invalid_certs: bool) -> Result<TlsParameters> {
+    TlsParameters::builder(host.to_string())
+        .dangerous_accept_invalid_certs(accept_invalid_certs)
+        .dangerous_accept_invalid_hostnames(accept_invalid_certs)
+        .build()
+        .map_err(|e| PebbleError::Network(format!("TLS parameters error: {e}")))
+}
+
 /// Authenticate on an open `AsyncSmtpConnection` and send one message.
 async fn authenticate_and_send(
     conn: &mut AsyncSmtpConnection,
@@ -309,21 +323,41 @@ async fn authenticate_and_send(
 }
 
 /// Build a rustls ClientConfig that trusts the system/webpki roots.
-fn build_rustls_client_config() -> Result<std::sync::Arc<rustls::ClientConfig>> {
+fn build_rustls_client_config(
+    accept_invalid_certs: bool,
+) -> Result<std::sync::Arc<rustls::ClientConfig>> {
     let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|e| PebbleError::Network(format!("TLS protocol versions: {e}")))?
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+        .map_err(|e| PebbleError::Network(format!("TLS protocol versions: {e}")))?;
+    let config = if accept_invalid_certs {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(
+                crate::imap::AcceptInvalidCertsVerifier::new(root_store),
+            ))
+            .with_no_client_auth()
+    } else {
+        builder
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
     Ok(std::sync::Arc::new(config))
 }
 
 /// Build a native-tls connector (OS TLS backend: SChannel/SecureTransport/OpenSSL).
-fn build_native_tls_connector() -> Result<async_native_tls::TlsConnector> {
-    let connector = native_tls::TlsConnector::new()
+fn build_native_tls_connector(
+    accept_invalid_certs: bool,
+) -> Result<async_native_tls::TlsConnector> {
+    let mut builder = native_tls::TlsConnector::builder();
+    if accept_invalid_certs {
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+    }
+    let connector = builder
+        .build()
         .map_err(|e| PebbleError::Network(format!("native-tls init: {e}")))?;
     Ok(async_native_tls::TlsConnector::from(connector))
 }
@@ -491,11 +525,13 @@ mod tls_config_tests {
 
     #[test]
     fn build_rustls_client_config_returns_result() {
-        assert!(build_rustls_client_config().is_ok());
+        assert!(build_rustls_client_config(false).is_ok());
+        assert!(build_rustls_client_config(true).is_ok());
     }
 
     #[test]
     fn build_native_tls_connector_returns_result() {
-        assert!(build_native_tls_connector().is_ok());
+        assert!(build_native_tls_connector(false).is_ok());
+        assert!(build_native_tls_connector(true).is_ok());
     }
 }

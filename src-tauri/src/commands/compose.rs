@@ -248,6 +248,7 @@ pub(crate) async fn send_imap_smtp_message(
         smtp_config.username,
         smtp_config.password,
         smtp_config.security,
+        smtp_config.accept_invalid_certs,
         smtp_config.proxy,
     );
 

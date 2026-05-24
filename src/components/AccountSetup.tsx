@@ -92,6 +92,7 @@ export default function AccountSetup({ onClose }: Props) {
     smtp_host: "",
     smtp_port: 587,
     smtp_security: "starttls",
+    accept_invalid_certs: false,
     username: "",
     password: "",
   };
@@ -173,6 +174,7 @@ export default function AccountSetup({ onClose }: Props) {
         form.imap_host,
         form.imap_port,
         form.imap_security,
+        form.accept_invalid_certs,
         form.proxy_host,
         form.proxy_port,
         form.username || undefined,
@@ -561,6 +563,26 @@ export default function AccountSetup({ onClose }: Props) {
                 </select>
               </div>
             </div>
+
+            {/* TLS certificate policy */}
+            <label
+              htmlFor="setup-accept-invalid-certs"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                fontSize: "12px",
+                color: "var(--color-text-primary)",
+              }}
+            >
+              <input
+                id="setup-accept-invalid-certs"
+                type="checkbox"
+                checked={!!form.accept_invalid_certs}
+                onChange={(e) => handleChange("accept_invalid_certs", e.target.checked)}
+              />
+              {t("accountSetup.acceptInvalidCerts", "Allow invalid TLS certificates")}
+            </label>
 
             {/* Username */}
             <div style={fieldStyle}>

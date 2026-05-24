@@ -160,13 +160,23 @@ export async function testImapConnection(
   imapHost: string,
   imapPort: number,
   imapSecurity: ConnectionSecurity,
+  acceptInvalidCerts?: boolean,
   proxyHost?: string,
   proxyPort?: number,
   username?: string,
   password?: string,
 ): Promise<string> {
   return invoke<string>("test_imap_connection", {
-    request: { imap_host: imapHost, imap_port: imapPort, imap_security: imapSecurity, proxy_host: proxyHost, proxy_port: proxyPort, username, password },
+    request: {
+      imap_host: imapHost,
+      imap_port: imapPort,
+      imap_security: imapSecurity,
+      accept_invalid_certs: acceptInvalidCerts,
+      proxy_host: proxyHost,
+      proxy_port: proxyPort,
+      username,
+      password,
+    },
   });
 }
 
@@ -185,6 +195,7 @@ export async function updateAccount(
   smtpPort?: number,
   imapSecurity?: ConnectionSecurity,
   smtpSecurity?: ConnectionSecurity,
+  acceptInvalidCerts?: boolean,
   proxyHost?: string,
   proxyPort?: number,
   accountColor?: string,
@@ -192,7 +203,7 @@ export async function updateAccount(
   return invoke<void>("update_account", {
     accountId, email, displayName, password,
     imapHost, imapPort, smtpHost, smtpPort, imapSecurity, smtpSecurity,
-    proxyHost, proxyPort, accountColor,
+    acceptInvalidCerts, proxyHost, proxyPort, accountColor,
   });
 }
 
