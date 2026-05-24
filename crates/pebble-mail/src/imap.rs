@@ -187,6 +187,24 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn incremental_fetch_uids(since_uid: Option<u32>, searched_uids: &[u32]) -> Vec<u32> {
+    let Some(since_uid) = since_uid else {
+        return searched_uids.to_vec();
+    };
+    let mut uids = searched_uids
+        .iter()
+        .copied()
+        .filter(|uid| *uid > since_uid)
+        .collect::<Vec<_>>();
+    uids.sort_unstable();
+    uids.dedup();
+    uids
+}
+
+fn should_search_incremental_uids(next_uid: u32, mailbox_uid_next: Option<u32>) -> bool {
+    mailbox_uid_next.is_none_or(|uid_next| next_uid < uid_next)
+}
+
 /// Stream wrapper that replays buffered prefix bytes, then delegates to inner.
 /// Used to replay the IMAP greeting after manually sending an ID command.
 #[derive(Debug)]
@@ -1229,7 +1247,27 @@ impl ImapProvider {
                         Some(n) => n,
                         None => return Ok(Vec::new()),
                     };
-                    let uid_set = format!("{next_uid}:*");
+                    if !should_search_incremental_uids(next_uid, mailbox_info.uid_next) {
+                        return Ok(Vec::new());
+                    }
+                    let search_query = format!("UID {next_uid}:*");
+                    let searched_uids: Vec<u32> = with_imap_timeout(
+                        "UID SEARCH",
+                        IMAP_COMMAND_TIMEOUT_SECS,
+                        $s.uid_search(&search_query),
+                    )
+                    .await?
+                    .into_iter()
+                    .collect();
+                    let fetch_uids = incremental_fetch_uids(Some(uid), &searched_uids);
+                    if fetch_uids.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    let uid_set = fetch_uids
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",");
                     let fetches = with_imap_timeout(
                         "UID FETCH",
                         IMAP_COMMAND_TIMEOUT_SECS,
@@ -1927,5 +1965,36 @@ mod tls_config_tests {
             error.to_string(),
             "Network error: UID FETCH timed out after 30s"
         );
+    }
+}
+
+#[cfg(test)]
+mod incremental_uid_tests {
+    use super::{incremental_fetch_uids, should_search_incremental_uids};
+
+    #[test]
+    fn incremental_fetch_skips_when_no_uid_is_newer_than_cursor() {
+        let uids = incremental_fetch_uids(Some(3291), &[1, 42, 3291]);
+
+        assert!(uids.is_empty());
+    }
+
+    #[test]
+    fn incremental_fetch_returns_only_newer_uids_sorted_and_deduped() {
+        let uids = incremental_fetch_uids(Some(42), &[45, 41, 43, 45, 42]);
+
+        assert_eq!(uids, vec![43, 45]);
+    }
+
+    #[test]
+    fn incremental_fetch_skips_search_when_uidnext_shows_no_new_mail() {
+        assert!(!should_search_incremental_uids(3292, Some(3292)));
+        assert!(!should_search_incremental_uids(3293, Some(3292)));
+    }
+
+    #[test]
+    fn incremental_fetch_searches_when_uidnext_is_missing_or_newer() {
+        assert!(should_search_incremental_uids(3292, None));
+        assert!(should_search_incremental_uids(3292, Some(3293)));
     }
 }
