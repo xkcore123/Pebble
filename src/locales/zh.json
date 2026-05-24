@@ -476,7 +476,10 @@
     "namePlaceholder": "您的姓名",
     "discardTitle": "放弃更改？",
     "discardConfirm": "您的更改将会丢失，确定放弃吗？",
-    "accountAdded": "账户添加成功"
+    "accountAdded": "账户添加成功",
+    "acceptInvalidCerts": "允许无效的 TLS 证书",
+    "tlsCertificateVerification": "TLS 证书验证",
+    "verifyTlsCerts": "验证证书"
   },
   "commands": {
     "navigation": "导航",

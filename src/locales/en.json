@@ -476,7 +476,10 @@
     "namePlaceholder": "Your Name",
     "discardTitle": "Discard changes?",
     "discardConfirm": "Your changes will be lost. Are you sure?",
-    "accountAdded": "Account added successfully"
+    "accountAdded": "Account added successfully",
+    "acceptInvalidCerts": "Allow invalid TLS certificates",
+    "tlsCertificateVerification": "TLS certificate verification",
+    "verifyTlsCerts": "Verify certificates"
   },
   "commands": {
     "navigation": "Navigation",

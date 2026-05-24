@@ -104,4 +104,19 @@ describe("locale files", () => {
     expect(zh.privacy.trackerBlockingDesc).not.toBe(en.privacy.trackerBlockingDesc);
     expect(zh.privacy.trackerBlockingOff).not.toBe(en.privacy.trackerBlockingOff);
   });
+
+  it("translates TLS certificate account setup labels in English and Chinese", () => {
+    const en = readLocale("en");
+    const zh = readLocale("zh");
+
+    expect(en.accountSetup.acceptInvalidCerts).toBe("Allow invalid TLS certificates");
+    expect(en.accountSetup.tlsCertificateVerification).toBe("TLS certificate verification");
+    expect(en.accountSetup.verifyTlsCerts).toBe("Verify certificates");
+    expect(zh.accountSetup.acceptInvalidCerts).toBeTruthy();
+    expect(zh.accountSetup.tlsCertificateVerification).toBeTruthy();
+    expect(zh.accountSetup.verifyTlsCerts).toBeTruthy();
+    expect(zh.accountSetup.acceptInvalidCerts).not.toBe(en.accountSetup.acceptInvalidCerts);
+    expect(zh.accountSetup.tlsCertificateVerification).not.toBe(en.accountSetup.tlsCertificateVerification);
+    expect(zh.accountSetup.verifyTlsCerts).not.toBe(en.accountSetup.verifyTlsCerts);
+  });
 });
