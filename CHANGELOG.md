@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-28
+
+### Added
+
+- Added POP3 account support, including account setup, sync, provider dispatch, folder/message operations, and backup/restore metadata handling.
+- Added an account-level option to allow invalid TLS certificates for IMAP and SMTP connections, including connection testing and settings UI support.
+
+### Changed
+
+- Updated the desktop release metadata to version 0.1.0.
+
+### Fixed
+
+- Recovered from invalid stored data-encryption keys by replacing malformed keyring entries instead of failing startup.
+- Avoided repeated IMAP incremental fetches by checking UIDNEXT and searching for UIDs newer than the local cursor before fetching message bodies.
+- Fixed TLS certificate policy localization in English and Chinese.
+- Disabled WebKitGTK accelerated compositing for Linux AppImage launches when the user has not set `WEBKIT_DISABLE_COMPOSITING_MODE`, working around Wayland/Hyprland repaint stalls where the UI only updates after resizing.
+
 ## [0.0.9] - 2026-05-23
 
 ### Added
@@ -201,7 +219,8 @@ This release includes:
 - Windows installers are not code-signed yet, so Windows SmartScreen may show a warning.
 - Outlook support is still experimental and depends on Microsoft Graph permissions configured by the user.
 
-[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.0.9...HEAD
+[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/QingJ01/Pebble/compare/v0.0.9...v0.1.0
 [0.0.9]: https://github.com/QingJ01/Pebble/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/QingJ01/Pebble/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/QingJ01/Pebble/compare/v0.0.6...v0.0.7
