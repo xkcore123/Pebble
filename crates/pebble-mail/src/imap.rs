@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use async_imap::Client;
+use async_imap::{types::NameAttribute, Client};
 use futures::TryStreamExt;
 use pebble_core::{new_id, Folder, FolderRole, FolderType, PebbleError, Result};
 use serde::de::Deserializer;
@@ -1177,25 +1177,35 @@ impl ImapProvider {
             .as_mut()
             .ok_or_else(|| PebbleError::Network("Not connected".to_string()))?;
 
-        let names: Vec<String> = {
+        let mailboxes: Vec<(String, Vec<NameAttribute<'static>>)> = {
             let stream = sess
                 .list(None, Some("*"))
                 .await
                 .map_err(|e| PebbleError::Network(format!("LIST failed: {e}")))?;
             stream
-                .map_ok(|n| n.name().to_string())
+                .map_ok(|n| {
+                    let attributes = n
+                        .attributes()
+                        .iter()
+                        .cloned()
+                        .map(NameAttribute::into_owned)
+                        .collect();
+                    (n.name().to_string(), attributes)
+                })
                 .try_collect()
                 .await
                 .map_err(|e| PebbleError::Network(format!("LIST collect: {e}")))?
         };
 
-        let mut folders: Vec<Folder> = names
+        let mut folders: Vec<Folder> = mailboxes
             .into_iter()
-            .map(|raw_name| {
+            .filter(|(_, attributes)| should_sync_listed_mailbox(attributes))
+            .map(|(raw_name, attributes)| {
                 // Decode IMAP Modified UTF-7 folder name to UTF-8
                 let display_name = utf7_imap::decode_utf7_imap(raw_name.clone());
-                let role =
-                    detect_folder_role(&raw_name).or_else(|| detect_folder_role(&display_name));
+                let role = detect_folder_role_from_attributes(&attributes)
+                    .or_else(|| detect_folder_role(&raw_name))
+                    .or_else(|| detect_folder_role(&display_name));
                 let sort_order = folder_sort_order(&role);
                 Folder {
                     id: new_id(),
@@ -1864,6 +1874,26 @@ fn parse_flags<'a>(flags: impl Iterator<Item = async_imap::types::Flag<'a>>) -> 
     (is_read, is_starred)
 }
 
+fn should_sync_listed_mailbox(attributes: &[NameAttribute<'_>]) -> bool {
+    !attributes
+        .iter()
+        .any(|attribute| matches!(attribute, NameAttribute::NoSelect))
+}
+
+fn detect_folder_role_from_attributes(attributes: &[NameAttribute<'_>]) -> Option<FolderRole> {
+    attributes.iter().find_map(|attribute| match attribute {
+        NameAttribute::Archive => Some(FolderRole::Archive),
+        NameAttribute::Drafts => Some(FolderRole::Drafts),
+        NameAttribute::Junk => Some(FolderRole::Spam),
+        NameAttribute::Sent => Some(FolderRole::Sent),
+        NameAttribute::Trash => Some(FolderRole::Trash),
+        NameAttribute::Extension(value) if value.eq_ignore_ascii_case("\\Inbox") => {
+            Some(FolderRole::Inbox)
+        }
+        _ => None,
+    })
+}
+
 /// Detect a folder role based on its name.
 pub fn detect_folder_role(name: &str) -> Option<FolderRole> {
     let lower = name.to_lowercase();
@@ -1965,6 +1995,56 @@ mod tls_config_tests {
             error.to_string(),
             "Network error: UID FETCH timed out after 30s"
         );
+    }
+}
+
+#[cfg(test)]
+mod folder_list_tests {
+    use async_imap::types::NameAttribute;
+    use pebble_core::FolderRole;
+
+    use super::{detect_folder_role_from_attributes, should_sync_listed_mailbox};
+
+    #[test]
+    fn special_use_attributes_detect_system_folder_roles() {
+        assert_eq!(
+            detect_folder_role_from_attributes(&[NameAttribute::Sent]),
+            Some(FolderRole::Sent)
+        );
+        assert_eq!(
+            detect_folder_role_from_attributes(&[NameAttribute::Trash]),
+            Some(FolderRole::Trash)
+        );
+        assert_eq!(
+            detect_folder_role_from_attributes(&[NameAttribute::Drafts]),
+            Some(FolderRole::Drafts)
+        );
+        assert_eq!(
+            detect_folder_role_from_attributes(&[NameAttribute::Archive]),
+            Some(FolderRole::Archive)
+        );
+        assert_eq!(
+            detect_folder_role_from_attributes(&[NameAttribute::Junk]),
+            Some(FolderRole::Spam)
+        );
+    }
+
+    #[test]
+    fn extension_inbox_attribute_detects_inbox_role() {
+        assert_eq!(
+            detect_folder_role_from_attributes(&[NameAttribute::Extension("\\Inbox".into())]),
+            Some(FolderRole::Inbox)
+        );
+    }
+
+    #[test]
+    fn noselect_mailboxes_are_not_synced_as_real_folders() {
+        assert!(!should_sync_listed_mailbox(&[NameAttribute::NoSelect]));
+        assert!(!should_sync_listed_mailbox(&[
+            NameAttribute::NoSelect,
+            NameAttribute::Extension("\\HasChildren".into()),
+        ]));
+        assert!(should_sync_listed_mailbox(&[NameAttribute::Sent]));
     }
 }
 
