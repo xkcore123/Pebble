@@ -94,16 +94,20 @@ fn extract_body_fragment(raw_html: &str) -> String {
     if let Some(body_start) = find_ascii_case_insensitive(raw_html, "<body") {
         if let Some(open_end) = find_tag_end(&raw_html[body_start..]) {
             let content_start = body_start + open_end + 1;
+            let body_tag = &raw_html[body_start..content_start];
             if let Some(close_start) =
                 find_ascii_case_insensitive(&raw_html[content_start..], "</body")
             {
-                return raw_html[content_start..content_start + close_start].to_string();
+                return wrap_body_fragment(
+                    body_tag,
+                    &raw_html[content_start..content_start + close_start],
+                );
             }
-            return raw_html[content_start..].to_string();
+            return wrap_body_fragment(body_tag, &raw_html[content_start..]);
         }
     }
 
-    strip_head_element(raw_html)
+    strip_document_metadata_elements(raw_html)
 }
 
 fn allow_embedded_styles(mode: &PrivacyMode) -> bool {
@@ -249,24 +253,95 @@ fn looks_like_html_document(html: &str) -> bool {
     find_ascii_case_insensitive(html, "<html").is_some()
         || find_ascii_case_insensitive(html, "<head").is_some()
         || find_ascii_case_insensitive(html, "<body").is_some()
+        || find_ascii_case_insensitive(html, "<title").is_some()
+        || find_ascii_case_insensitive(html, "<!doctype").is_some()
 }
 
-fn strip_head_element(html: &str) -> String {
-    let Some(head_start) = find_ascii_case_insensitive(html, "<head") else {
-        return html.to_string();
-    };
-    let Some(close_start_rel) = find_ascii_case_insensitive(&html[head_start..], "</head") else {
-        return html.to_string();
-    };
-    let close_start = head_start + close_start_rel;
-    let Some(close_end_rel) = find_tag_end(&html[close_start..]) else {
-        return html.to_string();
-    };
-    let close_end = close_start + close_end_rel + 1;
+fn wrap_body_fragment(body_tag: &str, body_html: &str) -> String {
+    let body_class = html_attr_value(body_tag, "class")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let body_style = body_style_from_attrs(body_tag);
+    if body_class.is_none() && body_style.is_none() {
+        return body_html.to_string();
+    }
 
-    let mut stripped = String::with_capacity(html.len().saturating_sub(close_end - head_start));
-    stripped.push_str(&html[..head_start]);
-    stripped.push_str(&html[close_end..]);
+    let class_attr = match body_class {
+        Some(class) => format!("pebble-email-body {class}"),
+        None => "pebble-email-body".to_string(),
+    };
+    let style_attr = body_style
+        .map(|style| format!(r#" style="{}""#, html_escape(&style)))
+        .unwrap_or_default();
+
+    format!(
+        r#"<div class="{}"{}>{}</div>"#,
+        html_escape(&class_attr),
+        style_attr,
+        body_html
+    )
+}
+
+fn body_style_from_attrs(body_tag: &str) -> Option<String> {
+    let mut style = html_attr_value(body_tag, "style")
+        .map(|value| value.trim().trim_end_matches(';').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+
+    if let Some(bgcolor) = html_attr_value(body_tag, "bgcolor")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        let lower_style = style.to_ascii_lowercase();
+        if !lower_style.contains("background") {
+            if !style.is_empty() {
+                style.push_str("; ");
+            }
+            style.push_str("background-color:");
+            style.push_str(&bgcolor);
+        }
+    }
+
+    if style.is_empty() {
+        None
+    } else {
+        Some(style)
+    }
+}
+
+fn strip_document_metadata_elements(html: &str) -> String {
+    let without_head = strip_element_pair(html, "head");
+    strip_element_pair(&without_head, "title")
+}
+
+fn strip_element_pair(html: &str, tag: &str) -> String {
+    let open_pattern = format!("<{tag}");
+    let close_pattern = format!("</{tag}");
+    let mut stripped = String::with_capacity(html.len());
+    let mut offset = 0;
+
+    while let Some(start_rel) = find_ascii_case_insensitive(&html[offset..], &open_pattern) {
+        let start = offset + start_rel;
+        stripped.push_str(&html[offset..start]);
+
+        let Some(close_start_rel) = find_ascii_case_insensitive(&html[start..], &close_pattern)
+        else {
+            if let Some(open_end_rel) = find_tag_end(&html[start..]) {
+                offset = start + open_end_rel + 1;
+                continue;
+            }
+            offset = html.len();
+            break;
+        };
+        let close_start = start + close_start_rel;
+        let Some(close_end_rel) = find_tag_end(&html[close_start..]) else {
+            offset = html.len();
+            break;
+        };
+        offset = close_start + close_end_rel + 1;
+    }
+
+    stripped.push_str(&html[offset..]);
     stripped
 }
 
@@ -327,7 +402,12 @@ fn filter_css_properties(style: &str) -> String {
         "border-bottom",
         "border-left",
         "border-color",
+        "border-radius",
         "border-style",
+        "border-top-left-radius",
+        "border-top-right-radius",
+        "border-bottom-right-radius",
+        "border-bottom-left-radius",
         "border-width",
         "border-collapse",
         "border-spacing",
@@ -1304,6 +1384,37 @@ mod tests {
         assert!(result.html.contains("Visible body"));
         assert!(!result.html.contains("Leaked subject"));
         assert!(!result.html.contains("p{color:red}"));
+    }
+
+    #[test]
+    fn render_safe_html_drops_title_text_from_fragment_documents() {
+        let guard = PrivacyGuard::new();
+        let html = r#"<!doctype html><title>Leaked subject</title><div>Visible body</div>"#;
+        let result = guard.render_safe_html(html, &PrivacyMode::LoadOnce);
+
+        assert!(result.html.contains("Visible body"));
+        assert!(!result.html.contains("Leaked subject"));
+    }
+
+    #[test]
+    fn render_safe_html_preserves_body_container_styles() {
+        let guard = PrivacyGuard::new();
+        let html = r#"
+            <html>
+              <body style="margin:0; padding:48px 0; background-color:#e6e9ed">
+                <table style="border-radius:20px; background-color:#ffffff">
+                  <tr><td>Visible body</td></tr>
+                </table>
+              </body>
+            </html>
+        "#;
+        let result = guard.render_safe_html(html, &PrivacyMode::LoadOnce);
+
+        assert!(result.html.contains("pebble-email-body"));
+        assert!(result.html.contains("padding:48px 0"));
+        assert!(result.html.contains("background-color:#e6e9ed"));
+        assert!(result.html.contains("border-radius:20px"));
+        assert!(result.html.contains("Visible body"));
     }
 
     #[test]

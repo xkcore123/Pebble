@@ -31,6 +31,15 @@ describe("sanitizeHtml", () => {
     expect(sanitized).toContain("color:");
   });
 
+  it("preserves safe border radius used by email cards", () => {
+    const sanitized = sanitizeHtml(
+      '<table style="border-radius:20px; background-color:#ffffff"><tbody><tr><td>Body</td></tr></tbody></table>',
+    );
+
+    expect(sanitized).toContain("border-radius:20px");
+    expect(sanitized).toContain("background-color:#ffffff");
+  });
+
   it("removes unsafe background shorthand urls", () => {
     const sanitized = sanitizeHtml(
       '<p style="background: url(https://evil.example/track); color: blue">Hello</p>',
