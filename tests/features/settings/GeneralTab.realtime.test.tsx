@@ -35,6 +35,8 @@ vi.mock("react-i18next", () => ({
         "settings.testNotificationFailed": "Failed to send test notification",
         "settings.closeBehavior": "Close Behavior",
         "settings.quitOnClose": "Quit app when window is closed",
+        "settings.startupBehavior": "Startup Behavior",
+        "settings.startHiddenToTray": "Start hidden to tray",
         "settings.folderCounts": "Folder Counts",
         "settings.showUnreadCount": "Show unread count badges in sidebar",
       };
@@ -53,6 +55,7 @@ describe("GeneralTab realtime mode", () => {
       showFolderUnreadCount: false,
       notificationsEnabled: true,
       keepRunningInBackground: true,
+      startHiddenToTray: false,
     });
   });
 
@@ -110,5 +113,17 @@ describe("GeneralTab realtime mode", () => {
 
     expect(useUIStore.getState().keepRunningInBackground).toBe(false);
     expect(localStorage.getItem("pebble-keep-running-background")).toBe("false");
+  });
+
+  it("shows startup behavior and persists start-hidden-to-tray through the UI store", () => {
+    render(<GeneralTab />);
+
+    const checkbox = screen.getByRole("checkbox", { name: "Start hidden to tray" });
+    expect((checkbox as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(checkbox);
+
+    expect(useUIStore.getState().startHiddenToTray).toBe(true);
+    expect(localStorage.getItem("pebble-start-hidden-to-tray")).toBe("true");
   });
 });

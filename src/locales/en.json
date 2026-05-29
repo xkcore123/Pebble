@@ -185,6 +185,8 @@
     "testNotificationSending": "Sending test notification...",
     "testNotificationSent": "Test notification sent",
     "testNotificationFailed": "Failed to send test notification",
+    "startupBehavior": "Startup Behavior",
+    "startHiddenToTray": "Start hidden to tray",
     "closeBehavior": "Close Behavior",
     "quitOnClose": "Quit app when window is closed",
     "folderCounts": "Folder Counts",

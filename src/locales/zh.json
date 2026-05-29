@@ -185,6 +185,8 @@
     "testNotificationSending": "正在发送测试通知...",
     "testNotificationSent": "测试通知已发送",
     "testNotificationFailed": "测试通知发送失败",
+    "startupBehavior": "启动行为",
+    "startHiddenToTray": "启动时隐藏到托盘",
     "closeBehavior": "关闭行为",
     "quitOnClose": "关闭窗口时退出应用",
     "folderCounts": "文件夹计数",

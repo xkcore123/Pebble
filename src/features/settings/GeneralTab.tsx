@@ -51,6 +51,8 @@ export default function GeneralTab() {
   const setNotificationsEnabled = useUIStore((s) => s.setNotificationsEnabled);
   const keepRunningInBackground = useUIStore((s) => s.keepRunningInBackground);
   const setKeepRunningInBackground = useUIStore((s) => s.setKeepRunningInBackground);
+  const startHiddenToTray = useUIStore((s) => s.startHiddenToTray);
+  const setStartHiddenToTray = useUIStore((s) => s.setStartHiddenToTray);
 
   const toggleNotifications = useCallback(() => {
     setNotificationsEnabled(!notificationsEnabled);
@@ -78,6 +80,10 @@ export default function GeneralTab() {
   const toggleQuitOnClose = useCallback(() => {
     setKeepRunningInBackground(quitOnClose);
   }, [quitOnClose, setKeepRunningInBackground]);
+
+  const toggleStartHiddenToTray = useCallback(() => {
+    setStartHiddenToTray(!startHiddenToTray);
+  }, [setStartHiddenToTray, startHiddenToTray]);
 
   const showUnreadCount = useUIStore((s) => s.showFolderUnreadCount);
   const setShowUnreadCount = useUIStore((s) => s.setShowFolderUnreadCount);
@@ -168,6 +174,27 @@ export default function GeneralTab() {
           ? t("settings.testNotificationSending", "Sending test notification...")
           : t("settings.testNotification", "Send test notification")}
       </button>
+
+      <h3 style={{ fontSize: "14px", fontWeight: 600, marginBottom: "16px", marginTop: "32px" }}>
+        {t("settings.startupBehavior", "Startup Behavior")}
+      </h3>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+          cursor: "pointer",
+          fontSize: "13px",
+          color: "var(--color-text-primary)",
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={startHiddenToTray}
+          onChange={toggleStartHiddenToTray}
+        />
+        <span>{t("settings.startHiddenToTray", "Start hidden to tray")}</span>
+      </label>
 
       <h3 style={{ fontSize: "14px", fontWeight: 600, marginBottom: "16px", marginTop: "32px" }}>
         {t("settings.closeBehavior", "Close Behavior")}

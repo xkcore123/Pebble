@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import i18n from "@/lib/i18n";
 import { getInitialLanguage, LANGUAGE_STORAGE_KEY, type Language } from "@/lib/language";
+import { readStartHiddenToTrayPreference, START_HIDDEN_TO_TRAY_KEY } from "@/lib/startupVisibility";
 import { useComposeStore } from "./compose.store";
 import { useMailStore } from "./mail.store";
 
@@ -110,6 +111,7 @@ export function realtimePreferenceToPollInterval(mode: RealtimePreference): numb
 const initialRealtimeMode = readRealtimePreference();
 const initialNotificationsEnabled = readNotificationsEnabledPreference();
 const initialKeepRunningInBackground = readKeepRunningInBackgroundPreference();
+const initialStartHiddenToTray = readStartHiddenToTrayPreference();
 const initialLanguage = getInitialLanguage();
 const initialBackgroundImage = readBackgroundImageSettings();
 
@@ -141,6 +143,8 @@ interface UIState {
   setNotificationsEnabled: (enabled: boolean) => void;
   keepRunningInBackground: boolean;
   setKeepRunningInBackground: (enabled: boolean) => void;
+  startHiddenToTray: boolean;
+  setStartHiddenToTray: (enabled: boolean) => void;
   previousView: ActiveView;
   toggleSidebar: () => void;
   setActiveView: (view: ActiveView) => void;
@@ -188,6 +192,11 @@ export const useUIStore = create<UIState>((set) => ({
   setKeepRunningInBackground: (enabled) => {
     localStorage.setItem(KEEP_RUNNING_BACKGROUND_KEY, String(enabled));
     set({ keepRunningInBackground: enabled });
+  },
+  startHiddenToTray: initialStartHiddenToTray,
+  setStartHiddenToTray: (enabled) => {
+    localStorage.setItem(START_HIDDEN_TO_TRAY_KEY, String(enabled));
+    set({ startHiddenToTray: enabled });
   },
   previousView: "inbox",
   toggleSidebar: () =>

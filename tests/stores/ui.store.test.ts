@@ -28,6 +28,7 @@ describe("UIStore", () => {
       showFolderUnreadCount: false,
       notificationsEnabled: true,
       keepRunningInBackground: true,
+      startHiddenToTray: false,
     });
     useComposeStore.setState({
       composeMode: null,
@@ -59,6 +60,7 @@ describe("UIStore", () => {
     expect(state.syncStatus).toBe("idle");
     expect(state.realtimeMode).toBe("realtime");
     expect(state.keepRunningInBackground).toBe(true);
+    expect(state.startHiddenToTray).toBe(false);
   });
 
   it("should toggle sidebar", () => {
@@ -254,6 +256,18 @@ describe("UIStore", () => {
     localStorage.setItem("pebble-keep-running-background", "false");
 
     expect(readKeepRunningInBackgroundPreference()).toBe(false);
+  });
+
+  it("persists start-hidden-to-tray preference through the UI store", () => {
+    useUIStore.getState().setStartHiddenToTray(true);
+
+    expect(useUIStore.getState().startHiddenToTray).toBe(true);
+    expect(localStorage.getItem("pebble-start-hidden-to-tray")).toBe("true");
+
+    useUIStore.getState().setStartHiddenToTray(false);
+
+    expect(useUIStore.getState().startHiddenToTray).toBe(false);
+    expect(localStorage.getItem("pebble-start-hidden-to-tray")).toBe("false");
   });
 
   it("persists desktop notification preference through the UI store", () => {
