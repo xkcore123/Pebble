@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Added local settings backup file export/import for cross-platform migration without WebDAV.
+- Added optional encrypted WebDAV backup and restore for account passwords, OAuth tokens, and translation API keys.
+
 ## [0.1.0] - 2026-05-28
 
 ### Added

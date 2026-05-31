@@ -3590,6 +3590,8 @@ dependencies = [
  "keyring",
  "pebble-core",
  "rand 0.8.5",
+ "ring",
+ "serde",
  "tracing",
  "zeroize",
 ]

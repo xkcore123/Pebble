@@ -591,16 +591,38 @@ export async function testWebdavConnection(url: string, username: string, passwo
   return invoke<string>("test_webdav_connection", { url, username, password });
 }
 
-export async function backupToWebdav(url: string, username: string, password: string): Promise<string> {
-  return invoke<string>("backup_to_webdav", { url, username, password });
+export async function backupToWebdav(
+  url: string,
+  username: string,
+  password: string,
+  secretPassphrase?: string,
+): Promise<string> {
+  return invoke<string>("backup_to_webdav", { url, username, password, secretPassphrase });
 }
 
 export async function previewWebdavBackup(url: string, username: string, password: string): Promise<BackupPreview> {
   return invoke<BackupPreview>("preview_webdav_backup", { url, username, password });
 }
 
-export async function restoreFromWebdav(url: string, username: string, password: string): Promise<string> {
-  return invoke<string>("restore_from_webdav", { url, username, password });
+export async function exportBackupFile(secretPassphrase?: string): Promise<string> {
+  return invoke<string>("export_backup_file", { secretPassphrase });
+}
+
+export async function previewBackupFile(data: string): Promise<BackupPreview> {
+  return invoke<BackupPreview>("preview_backup_file", { data });
+}
+
+export async function importBackupFile(data: string, secretPassphrase?: string): Promise<string> {
+  return invoke<string>("import_backup_file", { data, secretPassphrase });
+}
+
+export async function restoreFromWebdav(
+  url: string,
+  username: string,
+  password: string,
+  secretPassphrase?: string,
+): Promise<string> {
+  return invoke<string>("restore_from_webdav", { url, username, password, secretPassphrase });
 }
 
 // ─── Contacts API ────────────────────────────────────────────────────────────

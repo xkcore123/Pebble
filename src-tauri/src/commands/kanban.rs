@@ -4,7 +4,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use tauri::State;
 
-const KANBAN_CONTEXT_NOTES_KEY: &str = "kanban_context_notes";
+pub(crate) const KANBAN_CONTEXT_NOTES_KEY: &str = "kanban_context_notes";
 
 fn decrypt_json<T: DeserializeOwned>(
     state: &AppState,
@@ -19,10 +19,14 @@ fn decrypt_json<T: DeserializeOwned>(
         .map_err(|e| PebbleError::Internal(format!("Invalid secure user data for {key}: {e}")))
 }
 
-fn encrypt_json<T: Serialize>(state: &AppState, key: &str, value: &T) -> Result<(), PebbleError> {
+fn encrypt_json_bytes<T: Serialize>(state: &AppState, value: &T) -> Result<Vec<u8>, PebbleError> {
     let plaintext = serde_json::to_vec(value)
         .map_err(|e| PebbleError::Internal(format!("Failed to serialize secure user data: {e}")))?;
-    let encrypted = state.crypto.encrypt(&plaintext)?;
+    state.crypto.encrypt(&plaintext)
+}
+
+fn encrypt_json<T: Serialize>(state: &AppState, key: &str, value: &T) -> Result<(), PebbleError> {
+    let encrypted = encrypt_json_bytes(state, value)?;
     state.store.set_secure_user_data(key, &encrypted)
 }
 
@@ -44,6 +48,18 @@ pub(crate) fn load_kanban_context_notes_for_state(
     state: &AppState,
 ) -> Result<HashMap<String, String>, PebbleError> {
     Ok(decrypt_json(state, KANBAN_CONTEXT_NOTES_KEY)?.unwrap_or_default())
+}
+
+pub(crate) fn encrypt_kanban_context_notes_for_state(
+    state: &AppState,
+    notes: HashMap<String, String>,
+) -> Result<Option<Vec<u8>>, PebbleError> {
+    let notes = normalize_context_notes(notes);
+    if notes.is_empty() {
+        Ok(None)
+    } else {
+        encrypt_json_bytes(state, &notes).map(Some)
+    }
 }
 
 pub(crate) fn replace_kanban_context_notes_for_state(

@@ -1,5 +1,6 @@
 pub mod aes;
 pub mod keystore;
+pub mod passphrase;
 
 use pebble_core::Result;
 use zeroize::Zeroizing;
@@ -30,6 +31,53 @@ impl CryptoService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passphrase_encrypted_blob_round_trips() {
+        let plaintext = br#"{"accounts":[{"id":"a1","password":"secret"}]}"#;
+
+        let encrypted =
+            passphrase::encrypt_with_passphrase(plaintext, "correct horse battery staple").unwrap();
+        let decrypted =
+            passphrase::decrypt_with_passphrase(&encrypted, "correct horse battery staple")
+                .unwrap();
+
+        assert_eq!(decrypted, plaintext);
+        assert_ne!(encrypted.ciphertext_hex, String::from_utf8_lossy(plaintext));
+    }
+
+    #[test]
+    fn passphrase_encrypted_blob_rejects_wrong_passphrase() {
+        let encrypted = passphrase::encrypt_with_passphrase(b"secret", "right passphrase").unwrap();
+
+        let err = passphrase::decrypt_with_passphrase(&encrypted, "wrong passphrase")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Decryption failed"));
+    }
+
+    #[test]
+    fn passphrase_encrypted_blob_rejects_empty_passphrase() {
+        let err = passphrase::encrypt_with_passphrase(b"secret", "")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("passphrase is required"));
+    }
+
+    #[test]
+    fn passphrase_encrypted_blob_rejects_unsupported_iterations_before_decrypting() {
+        let mut encrypted =
+            passphrase::encrypt_with_passphrase(b"secret", "right passphrase").unwrap();
+        encrypted.iterations = 1;
+
+        let err = passphrase::decrypt_with_passphrase(&encrypted, "right passphrase")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Unsupported backup secret KDF iterations"));
+    }
 
     #[test]
     #[ignore] // Requires OS credential store access

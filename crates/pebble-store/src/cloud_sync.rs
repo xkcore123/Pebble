@@ -1,4 +1,5 @@
 use pebble_core::{PebbleError, Result};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -56,6 +57,9 @@ pub struct BackupPreview {
     pub kanban_card_count: usize,
     pub kanban_note_count: usize,
     pub has_translate_config: bool,
+    pub has_encrypted_secrets: bool,
+    pub secret_account_count: usize,
+    pub has_translate_secret: bool,
     pub size_bytes: usize,
 }
 
@@ -91,6 +95,17 @@ pub fn preview_backup(data: &[u8]) -> Result<BackupPreview> {
             .as_ref()
             .map(|tc| !tc.config.is_empty())
             .unwrap_or(false),
+        has_encrypted_secrets: backup.encrypted_secrets.is_some(),
+        secret_account_count: backup
+            .secret_summary
+            .as_ref()
+            .map(|summary| summary.account_auth_count)
+            .unwrap_or(0),
+        has_translate_secret: backup
+            .secret_summary
+            .as_ref()
+            .map(|summary| summary.has_translate_config)
+            .unwrap_or(false),
         size_bytes: data.len(),
     })
 }
@@ -106,6 +121,10 @@ pub struct SettingsBackup {
     #[serde(default)]
     pub kanban_context_notes: HashMap<String, String>,
     pub translate_config: Option<pebble_core::TranslateConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_summary: Option<BackupSecretSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_secrets: Option<serde_json::Value>,
 }
 
 /// Account data without passwords or auth secrets.
@@ -117,6 +136,32 @@ pub struct AccountBackup {
     #[serde(default)]
     pub color: Option<String>,
     pub provider: pebble_core::ProviderType,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestoredAuthData {
+    pub account_id: String,
+    pub provider: String,
+    pub encrypted: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestoredSecureUserData {
+    pub key: String,
+    pub encrypted: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RestoredPrivateData {
+    pub auth_data: Vec<RestoredAuthData>,
+    pub secure_user_data: Vec<RestoredSecureUserData>,
+    pub translate_config: Option<pebble_core::TranslateConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupSecretSummary {
+    pub account_auth_count: usize,
+    pub has_translate_config: bool,
 }
 
 pub struct WebDavClient {
@@ -278,6 +323,8 @@ impl Store {
             kanban_cards,
             kanban_context_notes: HashMap::new(),
             translate_config,
+            secret_summary: None,
+            encrypted_secrets: None,
         };
 
         let json = serde_json::to_vec_pretty(&backup)
@@ -393,6 +440,180 @@ impl Store {
             Ok(())
         })
     }
+
+    /// Import settings and already-encrypted private data in one transaction.
+    pub fn import_settings_with_private_data(
+        &self,
+        data: &[u8],
+        private_data: RestoredPrivateData,
+    ) -> Result<()> {
+        if data.len() > MAX_BACKUP_SIZE_BYTES {
+            return Err(PebbleError::Validation(format!(
+                "Backup file is too large ({} bytes, max {})",
+                data.len(),
+                MAX_BACKUP_SIZE_BYTES
+            )));
+        }
+        validate_backup_payload_shape(data)?;
+        let backup: SettingsBackup = serde_json::from_slice(data)
+            .map_err(|e| PebbleError::Validation(format!("Failed to deserialize settings: {e}")))?;
+        if backup.version == 0 || backup.version > BACKUP_SCHEMA_VERSION {
+            return Err(PebbleError::Validation(format!(
+                "Unsupported backup version {} (this build supports up to {})",
+                backup.version, BACKUP_SCHEMA_VERSION
+            )));
+        }
+
+        self.with_write(|conn| {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| PebbleError::Storage(format!("Failed to begin transaction: {e}")))?;
+
+            for ab in &backup.accounts {
+                let exists: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?1)",
+                        rusqlite::params![&ab.id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| PebbleError::Storage(e.to_string()))?;
+                let existing_color: Option<String> = if exists {
+                    tx.query_row(
+                        "SELECT color FROM accounts WHERE id = ?1",
+                        rusqlite::params![&ab.id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| PebbleError::Storage(e.to_string()))?
+                } else {
+                    None
+                };
+                let restored_color = ab.color.as_deref().or(existing_color.as_deref());
+                if !exists {
+                    let now = pebble_core::now_timestamp();
+                    let mut sync_state = crate::accounts::SyncState {
+                        provider: Some(provider_slug(&ab.provider).to_string()),
+                        ..Default::default()
+                    };
+                    sync_state
+                        .extra
+                        .insert("needs_reauth".into(), serde_json::Value::Bool(true));
+                    sync_state.extra.insert(
+                        "restore_is_partial".into(),
+                        serde_json::Value::Bool(true),
+                    );
+                    sync_state.extra.insert(
+                        "restored_from_backup_at".into(),
+                        serde_json::Value::Number(now.into()),
+                    );
+                    let sync_state_json = sync_state.to_json()?;
+                    tx.execute(
+                        "INSERT INTO accounts (id, email, display_name, color, provider, sync_state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        rusqlite::params![&ab.id, &ab.email, &ab.display_name, restored_color, provider_slug(&ab.provider), sync_state_json, now, now],
+                    ).map_err(|e| PebbleError::Storage(e.to_string()))?;
+                } else {
+                    tx.execute(
+                        "UPDATE accounts SET email = ?1, display_name = ?2, color = ?3, updated_at = ?4 WHERE id = ?5",
+                        rusqlite::params![&ab.email, &ab.display_name, restored_color, pebble_core::now_timestamp(), &ab.id],
+                    )
+                    .map_err(|e| PebbleError::Storage(e.to_string()))?;
+                }
+            }
+
+            tx.execute("DELETE FROM rules", [])
+                .map_err(|e| PebbleError::Storage(e.to_string()))?;
+            for rule in &backup.rules {
+                tx.execute(
+                    "INSERT INTO rules (id, name, priority, conditions, actions, is_enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![&rule.id, &rule.name, rule.priority, &rule.conditions, &rule.actions, rule.is_enabled, rule.created_at, rule.updated_at],
+                ).map_err(|e| PebbleError::Storage(e.to_string()))?;
+            }
+
+            tx.execute("DELETE FROM kanban_cards", [])
+                .map_err(|e| PebbleError::Storage(e.to_string()))?;
+            for card in &backup.kanban_cards {
+                Self::upsert_kanban_card_with_conn(&tx, card)?;
+            }
+
+            if let Some(tc) = &backup.translate_config {
+                if !tc.config.is_empty() {
+                    Self::save_translate_config_with_conn(&tx, tc)?;
+                }
+            }
+
+            for item in &private_data.secure_user_data {
+                if item.key.trim().is_empty() {
+                    return Err(PebbleError::Validation(
+                        "Restored secure user data key cannot be empty".to_string(),
+                    ));
+                }
+                if let Some(encrypted) = &item.encrypted {
+                    tx.execute(
+                        "INSERT INTO secure_user_data (key, value, updated_at)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(key) DO UPDATE SET
+                             value = excluded.value,
+                             updated_at = excluded.updated_at",
+                        rusqlite::params![&item.key, encrypted, pebble_core::now_timestamp()],
+                    )
+                    .map_err(|e| PebbleError::Storage(e.to_string()))?;
+                } else {
+                    tx.execute(
+                        "DELETE FROM secure_user_data WHERE key = ?1",
+                        rusqlite::params![&item.key],
+                    )
+                    .map_err(|e| PebbleError::Storage(e.to_string()))?;
+                }
+            }
+
+            for auth in &private_data.auth_data {
+                let now = pebble_core::now_timestamp();
+                let rows_affected = tx
+                    .execute(
+                        "UPDATE accounts SET auth_data = ?1, updated_at = ?2 WHERE id = ?3",
+                        rusqlite::params![&auth.encrypted, now, &auth.account_id],
+                    )
+                    .map_err(|e| PebbleError::Storage(e.to_string()))?;
+                if rows_affected == 0 {
+                    return Err(PebbleError::Validation(format!(
+                        "Backup secret references missing account: {}",
+                        auth.account_id
+                    )));
+                }
+
+                let current: Option<String> = tx
+                    .query_row(
+                        "SELECT sync_state FROM accounts WHERE id = ?1",
+                        rusqlite::params![&auth.account_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let mut sync_state =
+                    crate::accounts::SyncState::from_json_opt(current.as_deref())?;
+                sync_state.provider = Some(auth.provider.clone());
+                sync_state.extra.remove("needs_reauth");
+                sync_state.extra.remove("restore_is_partial");
+                let sync_state_json = sync_state.to_json()?;
+                tx.execute(
+                    "UPDATE accounts SET sync_state = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![
+                        sync_state_json,
+                        pebble_core::now_timestamp(),
+                        &auth.account_id
+                    ],
+                )
+                .map_err(|e| PebbleError::Storage(e.to_string()))?;
+            }
+
+            if let Some(config) = &private_data.translate_config {
+                Self::save_translate_config_with_conn(&tx, config)?;
+            }
+
+            tx.commit()
+                .map_err(|e| PebbleError::Storage(format!("Failed to commit: {e}")))?;
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +715,36 @@ mod tests {
     }
 
     #[test]
+    fn preview_backup_reports_encrypted_secret_summary() {
+        let backup = serde_json::json!({
+            "version": 1,
+            "exported_at": now_timestamp(),
+            "accounts": [],
+            "rules": [],
+            "kanban_cards": [],
+            "kanban_context_notes": {},
+            "translate_config": null,
+            "secret_summary": {
+                "account_auth_count": 2,
+                "has_translate_config": true
+            },
+            "encrypted_secrets": {
+                "algorithm": "aes-256-gcm",
+                "kdf": "pbkdf2-hmac-sha256",
+                "iterations": 210000,
+                "salt_hex": "00112233445566778899aabbccddeeff",
+                "ciphertext_hex": "00"
+            }
+        });
+
+        let preview = preview_backup(&serde_json::to_vec(&backup).unwrap()).unwrap();
+
+        assert!(preview.has_encrypted_secrets);
+        assert_eq!(preview.secret_account_count, 2);
+        assert!(preview.has_translate_secret);
+    }
+
+    #[test]
     fn test_import_does_not_duplicate_existing_accounts() {
         let store = Store::open_in_memory().unwrap();
         let now = now_timestamp();
@@ -592,6 +843,8 @@ mod tests {
             kanban_cards: vec![],
             kanban_context_notes: HashMap::new(),
             translate_config: None,
+            secret_summary: None,
+            encrypted_secrets: None,
         };
         let data = serde_json::to_vec(&backup).unwrap();
         store.import_settings(&data).unwrap();
@@ -599,6 +852,66 @@ mod tests {
         let rules = store.list_rules().unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "New Rule");
+    }
+
+    #[test]
+    fn import_settings_with_private_data_rolls_back_when_private_data_is_invalid() {
+        let store = Store::open_in_memory().unwrap();
+        let now = now_timestamp();
+
+        let old_rule = Rule {
+            id: new_id(),
+            name: "Old Rule".to_string(),
+            priority: 1,
+            conditions: "{}".to_string(),
+            actions: "[]".to_string(),
+            is_enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        store.insert_rule(&old_rule).unwrap();
+
+        let backup = SettingsBackup {
+            version: 1,
+            exported_at: now,
+            accounts: vec![],
+            rules: vec![Rule {
+                id: new_id(),
+                name: "New Rule".to_string(),
+                priority: 5,
+                conditions: "{}".to_string(),
+                actions: "[]".to_string(),
+                is_enabled: false,
+                created_at: now,
+                updated_at: now,
+            }],
+            kanban_cards: vec![],
+            kanban_context_notes: HashMap::new(),
+            translate_config: None,
+            secret_summary: None,
+            encrypted_secrets: None,
+        };
+        let data = serde_json::to_vec(&backup).unwrap();
+
+        let err = store
+            .import_settings_with_private_data(
+                &data,
+                RestoredPrivateData {
+                    auth_data: vec![RestoredAuthData {
+                        account_id: "missing-account".to_string(),
+                        provider: "imap".to_string(),
+                        encrypted: b"encrypted-auth".to_vec(),
+                    }],
+                    ..RestoredPrivateData::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("missing-account"));
+        let rules = store.list_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "Old Rule");
     }
 
     #[test]
@@ -687,6 +1000,8 @@ mod tests {
             }],
             kanban_context_notes: HashMap::new(),
             translate_config: None,
+            secret_summary: None,
+            encrypted_secrets: None,
         };
 
         store
@@ -718,6 +1033,8 @@ mod tests {
             kanban_cards: vec![],
             kanban_context_notes: HashMap::new(),
             translate_config: None,
+            secret_summary: None,
+            encrypted_secrets: None,
         };
 
         let data = serde_json::to_vec(&backup).unwrap();

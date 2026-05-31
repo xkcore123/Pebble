@@ -26,7 +26,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// Decrypt the config field of a TranslateConfig using the app's crypto service.
 /// If the stored value is legacy plaintext JSON, migrates it to encrypted form in-place.
-fn decrypt_config(state: &AppState, stored: &str) -> std::result::Result<String, PebbleError> {
+pub(crate) fn decrypt_config(
+    state: &AppState,
+    stored: &str,
+) -> std::result::Result<String, PebbleError> {
     if serde_json::from_str::<serde_json::Value>(stored).is_ok() {
         // Legacy plaintext config — migrate to encrypted form in-place.
         let encrypted = encrypt_config(state, stored)?;
@@ -40,7 +43,10 @@ fn decrypt_config(state: &AppState, stored: &str) -> std::result::Result<String,
 }
 
 /// Encrypt a plaintext config string for storage.
-fn encrypt_config(state: &AppState, plaintext: &str) -> std::result::Result<String, PebbleError> {
+pub(crate) fn encrypt_config(
+    state: &AppState,
+    plaintext: &str,
+) -> std::result::Result<String, PebbleError> {
     let encrypted = state.crypto.encrypt(plaintext.as_bytes())?;
     Ok(hex_encode(&encrypted))
 }
