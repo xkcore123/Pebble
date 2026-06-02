@@ -13,7 +13,7 @@ use pebble_store::cloud_sync::{
     RestoredSecureUserData, SettingsBackup, WebDavClient, SETTINGS_BACKUP_FILENAME,
 };
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AccountAuthBackup {
@@ -303,6 +303,103 @@ pub async fn restore_from_webdav(
     let client = WebDavClient::new(url, username, password)?;
     let data = client.download(SETTINGS_BACKUP_FILENAME).await?;
     restore_backup_data(&state, &data, secret_passphrase)
+}
+
+const AUTO_BACKUP_CONFIG_KEY: &str = "auto-backup-config";
+const AUTO_BACKUP_CHECK_INTERVAL_SECS: u64 = 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoBackupConfig {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+    pub secret_passphrase: Option<String>,
+    pub interval_minutes: u64,
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub fn save_auto_backup_config(
+    state: State<'_, AppState>,
+    config: AutoBackupConfig,
+) -> std::result::Result<(), PebbleError> {
+    let json = serde_json::to_vec(&config)
+        .map_err(|e| PebbleError::Internal(format!("Failed to serialize config: {e}")))?;
+    let encrypted = state.crypto.encrypt(&json)?;
+    state.store.set_secure_user_data(AUTO_BACKUP_CONFIG_KEY, &encrypted)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn load_auto_backup_config(
+    state: State<'_, AppState>,
+) -> std::result::Result<Option<AutoBackupConfig>, PebbleError> {
+    load_auto_backup_config_inner(&state.store, &state.crypto)
+}
+
+fn load_auto_backup_config_inner(
+    store: &pebble_store::Store,
+    crypto: &pebble_crypto::CryptoService,
+) -> std::result::Result<Option<AutoBackupConfig>, PebbleError> {
+    let Some(encrypted) = store.get_secure_user_data(AUTO_BACKUP_CONFIG_KEY)? else {
+        return Ok(None);
+    };
+    let json = crypto.decrypt(&encrypted)?;
+    let config: AutoBackupConfig = serde_json::from_slice(&json)
+        .map_err(|e| PebbleError::Internal(format!("Failed to deserialize config: {e}")))?;
+    Ok(Some(config))
+}
+
+#[tauri::command]
+pub fn delete_auto_backup_config(
+    state: State<'_, AppState>,
+) -> std::result::Result<(), PebbleError> {
+    state.store.delete_secure_user_data(AUTO_BACKUP_CONFIG_KEY)?;
+    Ok(())
+}
+
+pub async fn run_auto_backup_worker(app: tauri::AppHandle) {
+    let mut interval = tokio::time::interval(
+        tokio::time::Duration::from_secs(AUTO_BACKUP_CHECK_INTERVAL_SECS),
+    );
+    let mut last_backup_at: Option<std::time::Instant> = None;
+
+    loop {
+        interval.tick().await;
+
+        let state = app.state::<AppState>();
+        let config = match load_auto_backup_config_inner(&state.store, &state.crypto) {
+            Ok(Some(c)) if c.enabled => c,
+            _ => continue,
+        };
+
+        let backup_interval = std::time::Duration::from_secs(config.interval_minutes * 60);
+        if let Some(last) = last_backup_at {
+            if last.elapsed() < backup_interval {
+                continue;
+            }
+        }
+
+        tracing::info!("[auto-backup] starting scheduled WebDAV backup");
+        let backup_result: std::result::Result<(), PebbleError> = (|| async {
+            let data = build_backup_data(&state, config.secret_passphrase.clone())?;
+            let client = WebDavClient::new(config.url, config.username, config.password)?;
+            client.upload(SETTINGS_BACKUP_FILENAME, &data).await?;
+            Ok(())
+        })()
+        .await;
+
+        match backup_result {
+            Ok(()) => {
+                last_backup_at = Some(std::time::Instant::now());
+                tracing::info!("[auto-backup] backup completed successfully");
+                let _ = app.emit("cloud-sync:auto-backup-complete", ());
+            }
+            Err(e) => {
+                tracing::warn!("[auto-backup] backup failed: {e}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

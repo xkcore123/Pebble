@@ -33,6 +33,8 @@ const DEFAULT_BINDINGS: Record<string, string> = {
   "open-search": "Ctrl+Shift+F",
   "open-cloud-settings": "Ctrl+Shift+B",
   "toggle-notifications": "Ctrl+Shift+N",
+  "translate-selection": "T",
+  "toggle-bilingual": "Ctrl+Shift+T",
 };
 
 const STORAGE_KEY = "pebble-shortcuts";

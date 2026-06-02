@@ -15,6 +15,8 @@ import {
   previewBackupFile,
   previewWebdavBackup,
   restoreFromWebdav,
+  saveAutoBackupConfig,
+  loadAutoBackupConfig,
   type BackupPreview,
 } from "../../lib/api";
 import { extractErrorMessage as errorMessage } from "@/lib/extractErrorMessage";
@@ -65,6 +67,58 @@ export default function CloudSyncTab() {
   const [lastBackup, setLastBackup] = useState<string | null>(() =>
     localStorage.getItem(LAST_BACKUP_KEY),
   );
+
+  const [autoEnabled, setAutoEnabled] = useState(false);
+  const [autoInterval, setAutoInterval] = useState(60);
+  const [autoLoaded, setAutoLoaded] = useState(false);
+
+  useEffect(() => {
+    loadAutoBackupConfig().then((config) => {
+      if (config) {
+        setUrl(config.url);
+        setUsername(config.username);
+        setPassword(config.password);
+        setAutoEnabled(config.enabled);
+        setAutoInterval(config.interval_minutes);
+        if (config.secret_passphrase) {
+          setIncludeSecrets(true);
+          setSecretPassphrase(config.secret_passphrase);
+        }
+      }
+      setAutoLoaded(true);
+    }).catch(() => setAutoLoaded(true));
+  }, []);
+
+  async function handleAutoBackupToggle(enabled: boolean) {
+    setAutoEnabled(enabled);
+    if (enabled) {
+      await saveAutoBackupConfig({
+        url, username, password,
+        secret_passphrase: includeSecrets ? secretPassphrase : null,
+        interval_minutes: autoInterval,
+        enabled: true,
+      });
+    } else {
+      await saveAutoBackupConfig({
+        url, username, password,
+        secret_passphrase: includeSecrets ? secretPassphrase : null,
+        interval_minutes: autoInterval,
+        enabled: false,
+      });
+    }
+  }
+
+  async function handleAutoIntervalChange(minutes: number) {
+    setAutoInterval(minutes);
+    if (autoEnabled) {
+      await saveAutoBackupConfig({
+        url, username, password,
+        secret_passphrase: includeSecrets ? secretPassphrase : null,
+        interval_minutes: minutes,
+        enabled: true,
+      });
+    }
+  }
 
   async function handleTestConnection() {
     setTesting(true);
@@ -560,6 +614,46 @@ export default function CloudSyncTab() {
           }}
         >
           {t("cloudSync.lastBackup")}: {lastBackup}
+        </div>
+      )}
+
+      {/* Auto backup */}
+      {autoLoaded && (
+        <div style={{ marginTop: "24px", padding: "16px", border: "1px solid var(--color-border)", borderRadius: "8px", background: "var(--color-bg-secondary)" }}>
+          <h3 style={{ fontSize: "14px", fontWeight: 600, color: "var(--color-text-primary)", margin: "0 0 12px" }}>
+            {t("cloudSync.autoBackup", "Automatic Backup")}
+          </h3>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", color: "var(--color-text-primary)", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={autoEnabled}
+                onChange={(e) => handleAutoBackupToggle(e.target.checked)}
+                disabled={!url || !username || !password}
+              />
+              {t("cloudSync.autoBackupEnable", "Enable automatic WebDAV backup")}
+            </label>
+          </div>
+          {autoEnabled && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <label style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>
+                {t("cloudSync.autoBackupInterval", "Interval")}:
+              </label>
+              <select
+                value={autoInterval}
+                onChange={(e) => handleAutoIntervalChange(Number(e.target.value))}
+                style={{ ...inputStyle, width: "auto", padding: "4px 8px" }}
+              >
+                <option value={30}>30 min</option>
+                <option value={60}>1 h</option>
+                <option value={180}>3 h</option>
+                <option value={360}>6 h</option>
+                <option value={720}>12 h</option>
+                <option value={1440}>24 h</option>
+              </select>
+            </div>
+          )}
+          {!url && <p style={{ fontSize: "12px", color: "var(--color-text-secondary)", margin: "8px 0 0" }}>{t("cloudSync.autoBackupFillFields", "Fill in WebDAV credentials above to enable auto-backup.")}</p>}
         </div>
       )}
 

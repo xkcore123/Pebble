@@ -339,6 +339,10 @@ export async function listPendingMailOps(
   return invoke<PendingMailOp[]>("list_pending_mail_ops", { accountId, limit });
 }
 
+export async function openDefaultMailSettings(): Promise<void> {
+  return invoke<void>("open_default_mail_settings");
+}
+
 export async function dismissFailedPendingMailOps(
   accountId: string | null,
 ): Promise<number> {
@@ -629,6 +633,29 @@ export async function restoreFromWebdav(
   secretPassphrase?: string,
 ): Promise<string> {
   return invoke<string>("restore_from_webdav", { url, username, password, secretPassphrase });
+}
+
+// ─── Auto Backup API ────────────────────────────────────────────────────────
+
+export interface AutoBackupConfig {
+  url: string;
+  username: string;
+  password: string;
+  secret_passphrase: string | null;
+  interval_minutes: number;
+  enabled: boolean;
+}
+
+export async function saveAutoBackupConfig(config: AutoBackupConfig): Promise<void> {
+  return invoke<void>("save_auto_backup_config", { config });
+}
+
+export async function loadAutoBackupConfig(): Promise<AutoBackupConfig | null> {
+  return invoke<AutoBackupConfig | null>("load_auto_backup_config");
+}
+
+export async function deleteAutoBackupConfig(): Promise<void> {
+  return invoke<void>("delete_auto_backup_config");
 }
 
 // ─── Contacts API ────────────────────────────────────────────────────────────

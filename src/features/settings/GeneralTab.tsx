@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { showTestNotification } from "@/lib/api";
+import { showTestNotification, openDefaultMailSettings } from "@/lib/api";
 import { useToastStore } from "@/stores/toast.store";
 import { useUIStore, type RealtimePreference } from "@/stores/ui.store";
 
@@ -237,6 +237,33 @@ export default function GeneralTab() {
         />
         <span>{t("settings.showUnreadCount", "Show unread count badges in sidebar")}</span>
       </label>
+
+      {navigator.userAgent.includes("Windows") && (
+        <>
+          <h3 style={{ fontSize: "14px", fontWeight: 600, marginBottom: "16px", marginTop: "32px" }}>
+            {t("settings.defaultMailClient", "Default Email Client")}
+          </h3>
+          <button
+            type="button"
+            onClick={() => openDefaultMailSettings()}
+            style={{
+              padding: "8px 18px",
+              fontSize: "13px",
+              fontWeight: 500,
+              border: "1px solid var(--color-border)",
+              borderRadius: "6px",
+              cursor: "pointer",
+              background: "var(--color-bg-secondary)",
+              color: "var(--color-text-primary)",
+            }}
+          >
+            {t("settings.setDefaultMailClient", "Set Pebble as default email app")}
+          </button>
+          <p style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "6px" }}>
+            {t("settings.setDefaultMailClientHint", "Opens Windows Default Apps settings where you can select Pebble for email.")}
+          </p>
+        </>
+      )}
     </div>
   );
 }

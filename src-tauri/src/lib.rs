@@ -436,6 +436,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 commands::pending_mail_ops::run_pending_mail_ops_worker(app_for_pending_ops).await;
             });
+
+            let app_for_auto_backup = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                commands::cloud_sync::run_auto_backup_worker(app_for_auto_backup).await;
+            });
             log_startup_phase(startup_start, &mut startup_phase, "background workers scheduled");
             tracing::info!(
                 "[startup] tauri setup complete: {}ms total",
@@ -450,6 +455,7 @@ pub fn run() {
             commands::health::health_check,
             commands::health::check_for_update,
             commands::health::open_external_url,
+            commands::health::open_default_mail_settings,
             commands::diagnostics::read_app_log,
             commands::appearance::import_background_image,
             commands::appearance::delete_background_image,
@@ -533,6 +539,9 @@ pub fn run() {
             commands::cloud_sync::import_backup_file,
             commands::cloud_sync::preview_webdav_backup,
             commands::cloud_sync::restore_from_webdav,
+            commands::cloud_sync::save_auto_backup_config,
+            commands::cloud_sync::load_auto_backup_config,
+            commands::cloud_sync::delete_auto_backup_config,
             commands::contacts::search_contacts,
             commands::advanced_search::advanced_search,
             commands::sync_cmd::reindex_search,

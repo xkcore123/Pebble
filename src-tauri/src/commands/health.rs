@@ -55,6 +55,18 @@ pub async fn check_for_update(current_version: String) -> Result<UpdateInfo, Str
 }
 
 #[tauri::command]
+pub fn open_default_mail_settings() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        opener::open("ms-settings:defaultapps").map_err(|e| format!("Failed to open settings: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        Err("This feature is only available on Windows".to_string())
+    }
+}
+
+#[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     // Only allow safe URL schemes to prevent command injection via opener::open / ShellExecuteW
     if !url.starts_with("https://") && !url.starts_with("http://") && !url.starts_with("mailto:") {

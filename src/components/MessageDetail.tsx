@@ -168,17 +168,16 @@ export default function MessageDetail({ messageId, onBack, folderRole }: Props) 
     openSelectionActionsForSelection({ x: e.clientX, y: e.clientY }, selectedText);
   }
 
-  function handleContentKeyUp(e: React.KeyboardEvent) {
-    // Keyboard-equivalent entry to the mouse-driven translate popover: T fires
-    // on the current selection regardless of how the selection was built.
-    if (e.key !== "t" && e.key !== "T") return;
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const target = e.target as HTMLElement | null;
-    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
-      return;
-    }
-    openTranslateForSelection();
-  }
+  useEffect(() => {
+    const onTranslate = () => openTranslateForSelection();
+    const onBilingual = () => handleBilingualToggle();
+    document.addEventListener("pebble:translate-selection", onTranslate);
+    document.addEventListener("pebble:toggle-bilingual", onBilingual);
+    return () => {
+      document.removeEventListener("pebble:translate-selection", onTranslate);
+      document.removeEventListener("pebble:toggle-bilingual", onBilingual);
+    };
+  });
 
   if (loading) {
     return <MessageDetailSkeleton />;
@@ -365,7 +364,6 @@ export default function MessageDetail({ messageId, onBack, folderRole }: Props) 
         aria-label={t("messageDetail.body", "Message body")}
         style={{ flex: 1, overflow: "auto", padding: "16px" }}
         onContextMenu={handleContextMenu}
-        onKeyUp={handleContentKeyUp}
       >
         {bilingualMode && bilingualLoading ? (
             <div style={{ fontSize: "13px", color: "var(--color-text-secondary)" }}>{t("common.translating", "Translating...")}</div>
