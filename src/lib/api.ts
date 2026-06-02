@@ -339,6 +339,12 @@ export async function listPendingMailOps(
   return invoke<PendingMailOp[]>("list_pending_mail_ops", { accountId, limit });
 }
 
+export async function dismissFailedPendingMailOps(
+  accountId: string | null,
+): Promise<number> {
+  return invoke<number>("dismiss_failed_pending_mail_ops", { accountId });
+}
+
 // ─── Trusted Senders API ────────────────────────────────────────────────────
 
 export async function listTrustedSenders(accountId: string): Promise<TrustedSender[]> {

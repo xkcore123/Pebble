@@ -542,6 +542,7 @@ pub fn run() {
             commands::notifications::clear_notification_attention,
             commands::pending_mail_ops::get_pending_mail_ops_summary,
             commands::pending_mail_ops::list_pending_mail_ops,
+            commands::pending_mail_ops::dismiss_failed_pending_mail_ops,
             commands::drafts::save_draft,
             commands::drafts::delete_draft,
             commands::folder_counts::get_folder_unread_counts,

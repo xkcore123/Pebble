@@ -153,6 +153,11 @@ pub async fn process_pending_mail_ops(
                 state.store.mark_pending_mail_op_done(&op.id)?;
                 completed += 1;
             }
+            Err(ref e) if is_permanent_error(e) => {
+                state.store.mark_pending_mail_op_done(&op.id)?;
+                warn!("Pending mail op {} permanently failed (non-retryable): {e}", op.id);
+                completed += 1;
+            }
             Err(e) => {
                 state
                     .store
@@ -166,6 +171,25 @@ pub async fn process_pending_mail_ops(
         emit_pending_ops_changed(app);
     }
     Ok(completed)
+}
+
+fn is_permanent_error(e: &PebbleError) -> bool {
+    matches!(e, PebbleError::Auth(_) | PebbleError::UnsupportedProvider(_))
+}
+
+#[tauri::command]
+pub fn dismiss_failed_pending_mail_ops(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_id: Option<String>,
+) -> std::result::Result<u64, PebbleError> {
+    let dismissed = state
+        .store
+        .dismiss_failed_pending_mail_ops(account_id.as_deref())?;
+    if dismissed > 0 {
+        emit_pending_ops_changed(Some(&app));
+    }
+    Ok(dismissed)
 }
 
 fn emit_pending_ops_changed(app: Option<&tauri::AppHandle>) {

@@ -410,6 +410,23 @@ impl Store {
         })
     }
 
+    pub fn dismiss_failed_pending_mail_ops(&self, account_id: Option<&str>) -> Result<u64> {
+        self.with_write(|conn| {
+            let now = pebble_core::now_timestamp();
+            let rows = conn.execute(
+                "UPDATE pending_mail_ops
+                 SET status = ?1,
+                     last_error = NULL,
+                     updated_at = ?2,
+                     next_retry_at = NULL
+                 WHERE status = 'failed'
+                   AND (?3 IS NULL OR account_id = ?3)",
+                params![PendingMailOpStatus::Done.as_str(), now, account_id],
+            )?;
+            Ok(rows as u64)
+        })
+    }
+
     pub fn mark_pending_mail_op_done(&self, id: &str) -> Result<()> {
         self.with_write(|conn| {
             conn.execute(

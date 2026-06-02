@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Clock, RefreshCw } from "lucide-react";
+import { AlertCircle, Clock, RefreshCw, Trash2 } from "lucide-react";
 import type { PendingMailOp } from "@/lib/api";
+import { dismissFailedPendingMailOps } from "@/lib/api";
 import {
   pendingMailOpsQueryKey,
   pendingMailOpsSummaryQueryKey,
@@ -116,6 +117,11 @@ export default function PendingOpsTab() {
     await Promise.all([summaryQuery.refetch(), opsQuery.refetch()]);
   }
 
+  async function dismissFailed() {
+    await dismissFailedPendingMailOps(selectedAccountId);
+    await refresh();
+  }
+
   const summary = summaryQuery.data ?? {
     pending_count: 0,
     in_progress_count: 0,
@@ -166,29 +172,57 @@ export default function PendingOpsTab() {
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={refresh}
-          title={t("pendingOps.refresh", "Refresh")}
-          aria-label={t("pendingOps.refresh", "Refresh")}
-          disabled={summaryQuery.isFetching || opsQuery.isFetching}
-          style={{
-            width: "34px",
-            height: "34px",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            borderRadius: "6px",
-            border: "1px solid var(--color-border)",
-            background: "var(--color-bg-secondary)",
-            color: "var(--color-text-primary)",
-            cursor: "pointer",
-            opacity: summaryQuery.isFetching || opsQuery.isFetching ? 0.65 : 1,
-            flexShrink: 0,
-          }}
-        >
-          <RefreshCw size={15} />
-        </button>
+        <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
+          {summary.failed_count > 0 && (
+            <button
+              type="button"
+              onClick={dismissFailed}
+              title={t("pendingOps.dismissFailed", "Dismiss failed")}
+              aria-label={t("pendingOps.dismissFailed", "Dismiss failed")}
+              style={{
+                height: "34px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "0 12px",
+                borderRadius: "6px",
+                border: "1px solid var(--color-border)",
+                background: "var(--color-bg-secondary)",
+                color: "var(--color-warning, #d97706)",
+                cursor: "pointer",
+                fontSize: "12px",
+                fontWeight: 500,
+                whiteSpace: "nowrap",
+              }}
+            >
+              <Trash2 size={14} />
+              {t("pendingOps.dismissFailed", "Dismiss failed")}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={refresh}
+            title={t("pendingOps.refresh", "Refresh")}
+            aria-label={t("pendingOps.refresh", "Refresh")}
+            disabled={summaryQuery.isFetching || opsQuery.isFetching}
+            style={{
+              width: "34px",
+              height: "34px",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "6px",
+              border: "1px solid var(--color-border)",
+              background: "var(--color-bg-secondary)",
+              color: "var(--color-text-primary)",
+              cursor: "pointer",
+              opacity: summaryQuery.isFetching || opsQuery.isFetching ? 0.65 : 1,
+              flexShrink: 0,
+            }}
+          >
+            <RefreshCw size={15} />
+          </button>
+        </div>
       </div>
 
       <label
