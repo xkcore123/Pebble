@@ -191,6 +191,9 @@
     "quitOnClose": "关闭窗口时退出应用",
     "folderCounts": "文件夹计数",
     "showUnreadCount": "在侧边栏显示未读数徽章",
+    "defaultMailClient": "默认邮件客户端",
+    "setDefaultMailClient": "将 Pebble 设为默认邮件应用",
+    "setDefaultMailClientHint": "打开 Windows 默认应用设置，在其中选择 Pebble 作为默认邮件应用。",
     "globalProxy": "全局代理",
     "globalProxyDesc": "当账号未单独设置 SOCKS5 代理时，用于翻译、OAuth、Gmail/Outlook API 请求、IMAP、POP3 和 SMTP。",
     "globalProxyHost": "SOCKS5 代理",
@@ -261,7 +264,11 @@
     "secretPassphrase": "备份加密密码",
     "secretPassphrasePlaceholder": "备份或恢复 secrets 时必填",
     "secretPassphraseRequired": "请输入备份加密密码以包含邮箱密码、OAuth tokens 和 API keys。",
-    "restoreSecretPassphraseRequired": "这个备份包含加密 secrets。恢复前请输入备份加密密码。"
+    "restoreSecretPassphraseRequired": "这个备份包含加密 secrets。恢复前请输入备份加密密码。",
+    "autoBackup": "自动备份",
+    "autoBackupEnable": "启用 WebDAV 自动备份",
+    "autoBackupInterval": "间隔",
+    "autoBackupFillFields": "请先填写上方的 WebDAV 连接信息以启用自动备份。"
   },
   "pendingOps": {
     "title": "远端写回",
@@ -298,7 +305,8 @@
       "update_flags": "更新标记",
       "move_to_folder": "移动到文件夹",
       "send": "发送"
-    }
+    },
+    "dismissFailed": "清除失败项"
   },
   "about": {
     "title": "关于",

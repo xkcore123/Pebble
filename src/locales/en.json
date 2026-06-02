@@ -191,6 +191,9 @@
     "quitOnClose": "Quit app when window is closed",
     "folderCounts": "Folder Counts",
     "showUnreadCount": "Show unread count badges in sidebar",
+    "defaultMailClient": "Default Email Client",
+    "setDefaultMailClient": "Set Pebble as default email app",
+    "setDefaultMailClientHint": "Opens Windows Default Apps settings where you can select Pebble for email.",
     "globalProxy": "Global Proxy",
     "globalProxyDesc": "Used by translation, OAuth, Gmail/Outlook API requests, IMAP, POP3, and SMTP when an account does not define its own SOCKS5 proxy.",
     "globalProxyHost": "SOCKS5 Proxy",
@@ -261,7 +264,11 @@
     "secretPassphrase": "Backup encryption password",
     "secretPassphrasePlaceholder": "Required for backing up or restoring secrets",
     "secretPassphraseRequired": "Enter a backup encryption password to include account passwords, OAuth tokens, and API keys.",
-    "restoreSecretPassphraseRequired": "This backup contains encrypted secrets. Enter the backup encryption password before restoring."
+    "restoreSecretPassphraseRequired": "This backup contains encrypted secrets. Enter the backup encryption password before restoring.",
+    "autoBackup": "Automatic Backup",
+    "autoBackupEnable": "Enable automatic WebDAV backup",
+    "autoBackupInterval": "Interval",
+    "autoBackupFillFields": "Fill in WebDAV credentials above to enable auto-backup."
   },
   "pendingOps": {
     "title": "Remote Writes",
@@ -298,7 +305,8 @@
       "update_flags": "Update flags",
       "move_to_folder": "Move to folder",
       "send": "Send"
-    }
+    },
+    "dismissFailed": "Dismiss failed"
   },
   "about": {
     "title": "About",
