@@ -91,6 +91,11 @@ html, body, #root {
   backdrop-filter: blur(16px) saturate(1.02);
 }
 
+.app-shell--with-background .settings-panel-scroll {
+  background-color: color-mix(in srgb, var(--color-main-bg) 92%, transparent);
+  border-radius: 0;
+}
+
 input,
 textarea,
 select,

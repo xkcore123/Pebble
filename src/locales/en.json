@@ -399,7 +399,10 @@
     "recording": "Press keys...",
     "conflict": "Already assigned to: {{action}}",
     "resetDefaults": "Reset to Defaults",
-    "resetConfirm": "All shortcuts restored to defaults"
+    "resetConfirm": "All shortcuts restored to defaults",
+    "translate": "Translate",
+    "translateSelection": "Translate selection",
+    "toggleBilingual": "Toggle bilingual view"
   },
   "messageActions": {
     "reply": "Reply",

@@ -399,7 +399,10 @@
     "recording": "按下快捷键...",
     "conflict": "已分配给: {{action}}",
     "resetDefaults": "恢复默认设置",
-    "resetConfirm": "所有快捷键已恢复默认"
+    "resetConfirm": "所有快捷键已恢复默认",
+    "translate": "翻译",
+    "translateSelection": "翻译选中文字",
+    "toggleBilingual": "切换双语对照"
   },
   "messageActions": {
     "reply": "回复",
