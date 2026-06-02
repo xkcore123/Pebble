@@ -279,6 +279,13 @@ pub fn run() {
             if let Err(e) = setup_tray(app) {
                 tracing::warn!("Failed to create system tray icon: {e}");
             }
+
+            // macOS: enable native traffic-light window controls with overlay titlebar
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(true);
+                let _ = window.set_title_bar_style(tauri::TitleBarStyle::Overlay);
+            }
             app.manage(PendingMailtoUrls::default());
 
             let db_path = get_db_path(app)?;
