@@ -1,8 +1,8 @@
-use pebble_core::{PebbleError, Result};
+use pebble_core::{build_snippet, PebbleError, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
 
-const CURRENT_VERSION: u32 = 12;
+const CURRENT_VERSION: u32 = 13;
 const ACCOUNT_COLOR_PRESETS: [&str; 12] = [
     "#0ea5e9", "#22c55e", "#f59e0b", "#8b5cf6", "#f43f5e", "#14b8a6", "#6366f1", "#f97316",
     "#06b6d4", "#ec4899", "#84cc16", "#3b82f6",
@@ -121,6 +121,31 @@ fn rebuild_accounts_with_pop3_provider(conn: &Connection) -> Result<()> {
         ALTER TABLE accounts_new RENAME TO accounts;",
     )
     .map_err(|e| PebbleError::Storage(format!("Migration V12 failed: {e}")))?;
+    Ok(())
+}
+
+fn rebuild_snippets(conn: &Connection) -> Result<()> {
+    let mut stmt = match conn.prepare("SELECT id, body_text, body_html_raw FROM messages") {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| PebbleError::Storage(format!("V13 query failed: {e}")))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut update = conn
+        .prepare("UPDATE messages SET snippet = ?1 WHERE id = ?2")
+        .map_err(|e| PebbleError::Storage(format!("V13 prepare update failed: {e}")))?;
+    for (id, body_text, body_html) in &rows {
+        let new_snippet = build_snippet(body_text, body_html);
+        update
+            .execute(rusqlite::params![new_snippet, id])
+            .map_err(|e| PebbleError::Storage(format!("V13 update failed: {e}")))?;
+    }
     Ok(())
 }
 
@@ -360,6 +385,17 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
                 "Migration V12 introduced foreign key violations".to_string(),
             ));
         }
+    }
+
+    // V13: rebuild snippets to strip leaked HTML/CSS from previews
+    if version < 13 {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| PebbleError::Storage(format!("Migration V13 begin failed: {e}")))?;
+        rebuild_snippets(&tx)?;
+        set_schema_version(&tx, CURRENT_VERSION)?;
+        tx.commit()
+            .map_err(|e| PebbleError::Storage(format!("Migration V13 commit failed: {e}")))?;
     }
 
     Ok(())
