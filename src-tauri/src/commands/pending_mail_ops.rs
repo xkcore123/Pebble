@@ -155,7 +155,10 @@ pub async fn process_pending_mail_ops(
             }
             Err(ref e) if is_permanent_error(e) => {
                 state.store.mark_pending_mail_op_done(&op.id)?;
-                warn!("Pending mail op {} permanently failed (non-retryable): {e}", op.id);
+                warn!(
+                    "Pending mail op {} permanently failed (non-retryable): {e}",
+                    op.id
+                );
                 completed += 1;
             }
             Err(e) => {
@@ -174,7 +177,10 @@ pub async fn process_pending_mail_ops(
 }
 
 fn is_permanent_error(e: &PebbleError) -> bool {
-    matches!(e, PebbleError::Auth(_) | PebbleError::UnsupportedProvider(_))
+    matches!(
+        e,
+        PebbleError::Auth(_) | PebbleError::UnsupportedProvider(_)
+    )
 }
 
 #[tauri::command]

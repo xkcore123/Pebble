@@ -326,7 +326,9 @@ pub fn save_auto_backup_config(
     let json = serde_json::to_vec(&config)
         .map_err(|e| PebbleError::Internal(format!("Failed to serialize config: {e}")))?;
     let encrypted = state.crypto.encrypt(&json)?;
-    state.store.set_secure_user_data(AUTO_BACKUP_CONFIG_KEY, &encrypted)?;
+    state
+        .store
+        .set_secure_user_data(AUTO_BACKUP_CONFIG_KEY, &encrypted)?;
     Ok(())
 }
 
@@ -354,14 +356,16 @@ fn load_auto_backup_config_inner(
 pub fn delete_auto_backup_config(
     state: State<'_, AppState>,
 ) -> std::result::Result<(), PebbleError> {
-    state.store.delete_secure_user_data(AUTO_BACKUP_CONFIG_KEY)?;
+    state
+        .store
+        .delete_secure_user_data(AUTO_BACKUP_CONFIG_KEY)?;
     Ok(())
 }
 
 pub async fn run_auto_backup_worker(app: tauri::AppHandle) {
-    let mut interval = tokio::time::interval(
-        tokio::time::Duration::from_secs(AUTO_BACKUP_CHECK_INTERVAL_SECS),
-    );
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+        AUTO_BACKUP_CHECK_INTERVAL_SECS,
+    ));
     let mut last_backup_at: Option<std::time::Instant> = None;
 
     loop {
@@ -381,12 +385,12 @@ pub async fn run_auto_backup_worker(app: tauri::AppHandle) {
         }
 
         tracing::info!("[auto-backup] starting scheduled WebDAV backup");
-        let backup_result: std::result::Result<(), PebbleError> = (|| async {
+        let backup_result: std::result::Result<(), PebbleError> = async {
             let data = build_backup_data(&state, config.secret_passphrase.clone())?;
             let client = WebDavClient::new(config.url, config.username, config.password)?;
             client.upload(SETTINGS_BACKUP_FILENAME, &data).await?;
             Ok(())
-        })()
+        }
         .await;
 
         match backup_result {

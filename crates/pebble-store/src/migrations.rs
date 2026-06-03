@@ -130,9 +130,7 @@ fn rebuild_snippets(conn: &Connection) -> Result<()> {
         Err(_) => return Ok(()),
     };
     let rows: Vec<(String, String, String)> = stmt
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(|e| PebbleError::Storage(format!("V13 query failed: {e}")))?
         .filter_map(|r| r.ok())
         .collect();

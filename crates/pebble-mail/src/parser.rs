@@ -68,7 +68,6 @@ fn extract_id_list(hv: &HeaderValue<'_>) -> Option<String> {
     }
 }
 
-
 /// Parse a raw email byte slice into a `ParsedMessage`.
 pub fn parse_raw_email(raw: &[u8]) -> Result<ParsedMessage> {
     let message = MessageParser::default()
