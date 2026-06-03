@@ -61,10 +61,19 @@ Pebble currently supports Gmail, IMAP, and experimental Outlook accounts.
 
 - Kanban board with Todo, Waiting, and Done columns.
 - Command palette and keyboard-first navigation.
-- Built-in translation providers with bilingual reading.
-- Dark and light themes.
+- Built-in translation providers with bilingual reading and customizable shortcuts (`T` to translate selection, `Ctrl+Shift+T` to toggle bilingual view).
+- Dark and light themes with wallpaper background support.
 - English and Chinese UI.
 - Optional local file export/import and WebDAV backup for settings, rules, Kanban cards, Kanban notes, and separately encrypted account secrets.
+- Automatic scheduled WebDAV backup with configurable interval.
+
+### Platform integration
+
+- Native macOS traffic-light window controls.
+- Register as default email client on Windows (Settings > General).
+- Lightweight tray mode: sync workers pause when the window is hidden, resume on focus.
+- Start hidden to system tray option.
+- `mailto:` protocol handler for composing mail from external apps.
 
 ## Screenshots
 
@@ -211,6 +220,8 @@ Pebble/
 | `F` | Forward |
 | `C` | Compose |
 | `/` | Focus search |
+| `T` | Translate selected text |
+| `Ctrl+Shift+T` | Toggle bilingual view |
 | `Esc` | Close, cancel, or go back |
 
 Shortcuts can be reviewed and customized in Settings.
