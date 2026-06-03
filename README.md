@@ -34,7 +34,7 @@ The app is designed around a few practical ideas:
 - Privacy controls should be explicit, visible, and easy to override per message.
 - Search, snooze, rules, and a Kanban board should work together instead of living in separate tools.
 
-Pebble currently supports Gmail, IMAP, and experimental Outlook accounts.
+Pebble currently supports Gmail, IMAP, POP3, and experimental Outlook accounts.
 
 ## Highlights
 
@@ -50,12 +50,14 @@ Pebble currently supports Gmail, IMAP, and experimental Outlook accounts.
 ### Mail workflow
 
 - Unified inbox across multiple accounts.
-- Gmail, IMAP, and experimental Outlook support.
+- Gmail, IMAP, POP3, and experimental Outlook support.
 - Threaded and message-list views.
 - Archive, delete, star, mark read, batch actions, and restore flows.
 - Snooze messages and bring them back later.
 - Full-text search and advanced filters.
 - Rules engine for automatic organization.
+- Email CSS rendering with embedded style support.
+- Option to allow invalid TLS certificates for self-hosted mail servers.
 
 ### Productivity tools
 
