@@ -58,12 +58,84 @@ pub async fn check_for_update(current_version: String) -> Result<UpdateInfo, Str
 pub fn open_default_mail_settings() -> Result<(), String> {
     #[cfg(windows)]
     {
+        register_as_mail_client()?;
         opener::open("ms-settings:defaultapps").map_err(|e| format!("Failed to open settings: {e}"))
     }
     #[cfg(not(windows))]
     {
         Err("This feature is only available on Windows".to_string())
     }
+}
+
+#[cfg(windows)]
+fn register_as_mail_client() -> Result<(), String> {
+    use windows_registry::CURRENT_USER;
+
+    let exe_path = tauri::utils::platform::current_exe()
+        .map_err(|e| format!("Failed to get exe path: {e}"))?;
+    let exe = exe_path.to_string_lossy();
+    let open_cmd = format!("\"{exe}\" \"%1\"");
+
+    // Register as a mail client
+    let client_key = CURRENT_USER
+        .create(r"SOFTWARE\Clients\Mail\Pebble")
+        .map_err(|e| e.to_string())?;
+    client_key
+        .set_string("", "Pebble")
+        .map_err(|e| e.to_string())?;
+
+    let shell_key = CURRENT_USER
+        .create(r"SOFTWARE\Clients\Mail\Pebble\shell\open\command")
+        .map_err(|e| e.to_string())?;
+    shell_key
+        .set_string("", format!("\"{exe}\""))
+        .map_err(|e| e.to_string())?;
+
+    // Register capabilities
+    let caps_key = CURRENT_USER
+        .create(r"SOFTWARE\Clients\Mail\Pebble\Capabilities")
+        .map_err(|e| e.to_string())?;
+    caps_key
+        .set_string("ApplicationName", "Pebble")
+        .map_err(|e| e.to_string())?;
+    caps_key
+        .set_string("ApplicationDescription", "Pebble Email Client")
+        .map_err(|e| e.to_string())?;
+
+    let url_key = CURRENT_USER
+        .create(r"SOFTWARE\Clients\Mail\Pebble\Capabilities\UrlAssociations")
+        .map_err(|e| e.to_string())?;
+    url_key
+        .set_string("mailto", "Pebble.Url.mailto")
+        .map_err(|e| e.to_string())?;
+
+    // Register mailto protocol handler class
+    let class_key = CURRENT_USER
+        .create(r"SOFTWARE\Classes\Pebble.Url.mailto")
+        .map_err(|e| e.to_string())?;
+    class_key
+        .set_string("", "Pebble Email URL")
+        .map_err(|e| e.to_string())?;
+    class_key
+        .set_string("URL Protocol", "")
+        .map_err(|e| e.to_string())?;
+
+    let class_cmd_key = CURRENT_USER
+        .create(r"SOFTWARE\Classes\Pebble.Url.mailto\shell\open\command")
+        .map_err(|e| e.to_string())?;
+    class_cmd_key
+        .set_string("", &open_cmd)
+        .map_err(|e| e.to_string())?;
+
+    // Register in RegisteredApplications
+    let reg_apps_key = CURRENT_USER
+        .create(r"SOFTWARE\RegisteredApplications")
+        .map_err(|e| e.to_string())?;
+    reg_apps_key
+        .set_string("Pebble", r"SOFTWARE\Clients\Mail\Pebble\Capabilities")
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 #[tauri::command]
