@@ -6,10 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-03
+
 ### Added
 
+- Added a tray preference to start Pebble hidden in the system tray at launch.
+- Added native macOS traffic-light window controls in the title bar for a platform-idiomatic close/minimize/maximize experience.
+- Added translation keyboard shortcuts, automatic settings backup, a default mail client preference, and a lightweight mode for the tray.
 - Added local settings backup file export/import for cross-platform migration without WebDAV.
 - Added optional encrypted WebDAV backup and restore for account passwords, OAuth tokens, and translation API keys.
+
+### Changed
+
+- Updated the desktop release metadata to version 0.1.1.
+
+### Fixed
+
+- Honored IMAP special-use folder attributes so the Trash, Sent, Drafts, Junk, and Archive flags reported by servers map to the expected local folders.
+- Preserved email HTML container styles (such as `html`, `body`, and wrapper element rules) so sanitized messages keep their original layout.
+- Stripped HTML and CSS from email preview snippets so list rows show clean plain-text previews instead of markup.
+- Stopped retrying permanent authentication errors for pending mail operations, surfaced clearer status, and allowed dismissing failed operations from settings.
+- Added missing English and Chinese translations for the new automatic backup, default mail client, and pending operations controls.
+- Surfaced translation keyboard shortcuts in the settings page and fixed the wallpaper mode settings background rendering.
 
 ## [0.1.0] - 2026-05-28
 
@@ -224,7 +242,8 @@ This release includes:
 - Windows installers are not code-signed yet, so Windows SmartScreen may show a warning.
 - Outlook support is still experimental and depends on Microsoft Graph permissions configured by the user.
 
-[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/QingJ01/Pebble/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/QingJ01/Pebble/compare/v0.0.9...v0.1.0
 [0.0.9]: https://github.com/QingJ01/Pebble/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/QingJ01/Pebble/compare/v0.0.7...v0.0.8
