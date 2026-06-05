@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use pebble_core::{PebbleError, Result};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_native_tls as async_native_tls;
+use tracing::debug;
 
 use crate::imap::{ConnectionSecurity, ProxyConfig};
 
@@ -39,7 +41,8 @@ pub struct Pop3MessageRef {
 
 enum Pop3Stream {
     Plain(TcpStream),
-    Tls(Box<async_native_tls::TlsStream<TcpStream>>),
+    Rustls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+    NativeTls(Box<async_native_tls::TlsStream<TcpStream>>),
 }
 
 impl AsyncRead for Pop3Stream {
@@ -50,7 +53,8 @@ impl AsyncRead for Pop3Stream {
     ) -> Poll<std::io::Result<()>> {
         match &mut *self {
             Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+            Self::Rustls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+            Self::NativeTls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
         }
     }
 }
@@ -63,21 +67,24 @@ impl AsyncWrite for Pop3Stream {
     ) -> Poll<std::io::Result<usize>> {
         match &mut *self {
             Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+            Self::Rustls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+            Self::NativeTls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match &mut *self {
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+            Self::Rustls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+            Self::NativeTls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match &mut *self {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+            Self::Rustls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+            Self::NativeTls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
         }
     }
 }
@@ -157,35 +164,82 @@ impl Pop3Provider {
     }
 
     async fn connect_client(config: &Pop3Config) -> Result<Pop3Client> {
-        let tcp = connect_tcp(config).await?;
-        let stream = match config.security {
-            ConnectionSecurity::Tls => Pop3Stream::Tls(Box::new(
-                build_tls_connector(config.accept_invalid_certs)?
-                    .connect(&config.host, tcp)
-                    .await
-                    .map_err(|e| PebbleError::Network(format!("POP3 TLS handshake: {e}")))?,
-            )),
-            ConnectionSecurity::Plain | ConnectionSecurity::StartTls => Pop3Stream::Plain(tcp),
-        };
+        match config.security {
+            ConnectionSecurity::Tls => Self::connect_implicit_tls(config).await,
+            ConnectionSecurity::StartTls => match Self::connect_starttls(config, false).await {
+                Ok(client) => Ok(client),
+                Err(rustls_err) => {
+                    debug!(
+                        "POP3 STARTTLS with rustls failed ({}), retrying with native-tls",
+                        rustls_err
+                    );
+                    Self::connect_starttls(config, true)
+                        .await
+                        .map_err(|native_err| {
+                            PebbleError::Network(format!(
+                                    "POP3 STARTTLS failed with both TLS backends — rustls: {rustls_err}, native-tls: {native_err}"
+                                ))
+                        })
+                }
+            },
+            ConnectionSecurity::Plain => {
+                let tcp = connect_tcp(config).await?;
+                let mut client = Pop3Client::new(Pop3Stream::Plain(tcp));
+                client.read_status().await?;
+                client.login(&config.username, &config.password).await?;
+                Ok(client)
+            }
+        }
+    }
 
+    async fn connect_implicit_tls(config: &Pop3Config) -> Result<Pop3Client> {
+        let tcp = connect_tcp(config).await?;
+        let stream = match rustls_connect(&config.host, tcp, config.accept_invalid_certs).await {
+            Ok(tls) => Pop3Stream::Rustls(Box::new(tls)),
+            Err(rustls_err) => {
+                debug!(
+                    "POP3 rustls handshake failed ({}), retrying with native-tls",
+                    rustls_err
+                );
+                let tcp = connect_tcp(config).await?;
+                let tls = native_tls_connect(&config.host, tcp, config.accept_invalid_certs)
+                    .await
+                    .map_err(|e| {
+                        PebbleError::Network(format!(
+                            "POP3 TLS failed with both backends — rustls: {rustls_err}, native-tls: {e}"
+                        ))
+                    })?;
+                Pop3Stream::NativeTls(Box::new(tls))
+            }
+        };
         let mut client = Pop3Client::new(stream);
         client.read_status().await?;
+        client.login(&config.username, &config.password).await?;
+        Ok(client)
+    }
 
-        if matches!(config.security, ConnectionSecurity::StartTls) {
-            client.command("STLS").await?;
-            let stream = client.into_inner();
-            let Pop3Stream::Plain(tcp) = stream else {
-                return Err(PebbleError::Network(
-                    "POP3 STARTTLS attempted on TLS stream".to_string(),
-                ));
-            };
-            let tls = build_tls_connector(config.accept_invalid_certs)?
-                .connect(&config.host, tcp)
-                .await
-                .map_err(|e| PebbleError::Network(format!("POP3 STARTTLS handshake: {e}")))?;
-            client = Pop3Client::new(Pop3Stream::Tls(Box::new(tls)));
-        }
+    async fn connect_starttls(config: &Pop3Config, use_native_tls: bool) -> Result<Pop3Client> {
+        let tcp = connect_tcp(config).await?;
+        let mut client = Pop3Client::new(Pop3Stream::Plain(tcp));
+        client.read_status().await?;
+        client.command("STLS").await?;
 
+        let stream = client.into_inner();
+        let Pop3Stream::Plain(tcp) = stream else {
+            return Err(PebbleError::Network(
+                "POP3 STARTTLS attempted on TLS stream".to_string(),
+            ));
+        };
+
+        let upgraded = if use_native_tls {
+            let tls = native_tls_connect(&config.host, tcp, config.accept_invalid_certs).await?;
+            Pop3Stream::NativeTls(Box::new(tls))
+        } else {
+            let tls = rustls_connect(&config.host, tcp, config.accept_invalid_certs).await?;
+            Pop3Stream::Rustls(Box::new(tls))
+        };
+
+        let mut client = Pop3Client::new(upgraded);
         client.login(&config.username, &config.password).await?;
         Ok(client)
     }
@@ -338,16 +392,72 @@ async fn connect_tcp(config: &Pop3Config) -> Result<TcpStream> {
     }
 }
 
-fn build_tls_connector(accept_invalid_certs: bool) -> Result<async_native_tls::TlsConnector> {
+fn build_rustls_connector(accept_invalid_certs: bool) -> Result<tokio_rustls::TlsConnector> {
+    use crate::imap::AcceptInvalidCertsVerifier;
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| PebbleError::Network(format!("POP3 TLS protocol versions: {e}")))?;
+    let config = if accept_invalid_certs {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptInvalidCertsVerifier::new(root_store)))
+            .with_no_client_auth()
+    } else {
+        builder
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
+    Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
+}
+
+async fn rustls_connect(
+    host: &str,
+    tcp: TcpStream,
+    accept_invalid_certs: bool,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let connector = build_rustls_connector(accept_invalid_certs)?;
+    let server_name = rustls::pki_types::ServerName::try_from(host)
+        .map_err(|e| PebbleError::Network(format!("Invalid server name '{}': {}", host, e)))?
+        .to_owned();
+    with_pop3_display_timeout(
+        &format!("POP3 TLS handshake (rustls) with {host}"),
+        POP3_CONNECT_TIMEOUT_SECS,
+        connector.connect(server_name, tcp),
+    )
+    .await
+}
+
+fn build_native_tls_connector(
+    accept_invalid_certs: bool,
+) -> Result<async_native_tls::TlsConnector> {
     let mut builder = native_tls::TlsConnector::builder();
     if accept_invalid_certs {
         builder.danger_accept_invalid_certs(true);
         builder.danger_accept_invalid_hostnames(true);
+        builder.min_protocol_version(Some(native_tls::Protocol::Tlsv10));
     }
     let connector = builder
         .build()
-        .map_err(|e| PebbleError::Network(format!("POP3 TLS init: {e}")))?;
+        .map_err(|e| PebbleError::Network(format!("POP3 native-tls init: {e}")))?;
     Ok(async_native_tls::TlsConnector::from(connector))
+}
+
+async fn native_tls_connect(
+    host: &str,
+    tcp: TcpStream,
+    accept_invalid_certs: bool,
+) -> Result<async_native_tls::TlsStream<TcpStream>> {
+    let connector = build_native_tls_connector(accept_invalid_certs)?;
+    with_pop3_display_timeout(
+        &format!("POP3 TLS handshake (native-tls) with {host}"),
+        POP3_CONNECT_TIMEOUT_SECS,
+        connector.connect(host, tcp),
+    )
+    .await
 }
 
 async fn with_pop3_timeout<T, F>(operation: &str, seconds: u64, future: F) -> Result<T>
@@ -429,7 +539,10 @@ fn validate_command_arg(label: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_list_lines, parse_uidl_lines, strip_crlf, validate_command_arg};
+    use super::{
+        build_native_tls_connector, build_rustls_connector, parse_list_lines, parse_uidl_lines,
+        strip_crlf, validate_command_arg,
+    };
 
     #[test]
     fn parse_uidl_lines_extracts_message_numbers_and_uids() {
@@ -461,5 +574,17 @@ mod tests {
         validate_command_arg("POP3 username", "user@example.com").unwrap();
         assert!(validate_command_arg("POP3 username", "user\r\nSTAT").is_err());
         assert!(validate_command_arg("POP3 password", "pass\nQUIT").is_err());
+    }
+
+    #[test]
+    fn build_rustls_connector_returns_result() {
+        assert!(build_rustls_connector(false).is_ok());
+        assert!(build_rustls_connector(true).is_ok());
+    }
+
+    #[test]
+    fn build_native_tls_connector_returns_result() {
+        assert!(build_native_tls_connector(false).is_ok());
+        assert!(build_native_tls_connector(true).is_ok());
     }
 }

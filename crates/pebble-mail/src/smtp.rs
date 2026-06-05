@@ -355,6 +355,7 @@ fn build_native_tls_connector(
     if accept_invalid_certs {
         builder.danger_accept_invalid_certs(true);
         builder.danger_accept_invalid_hostnames(true);
+        builder.min_protocol_version(Some(native_tls::Protocol::Tlsv10));
     }
     let connector = builder
         .build()
