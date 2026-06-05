@@ -116,7 +116,7 @@ const initialLanguage = getInitialLanguage();
 const initialBackgroundImage = readBackgroundImageSettings();
 
 /** Resolve "system" theme to an actual "dark" | "light" value. */
-function resolveTheme(theme: Theme): "dark" | "light" {
+export function resolveTheme(theme: Theme): "dark" | "light" {
   if (theme === "system") {
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }

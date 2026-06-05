@@ -139,6 +139,19 @@ fn register_as_mail_client() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn sync_titlebar_theme(window: tauri::WebviewWindow, theme: String) -> Result<(), String> {
+    use tauri::window::Color;
+
+    let color = match theme.as_str() {
+        "dark" => Color(0x1e, 0x1e, 0x1e, 0xff),
+        _ => Color(0xf8, 0xf7, 0xf5, 0xff),
+    };
+    window
+        .set_background_color(Some(color))
+        .map_err(|e| format!("Failed to set background color: {e}"))
+}
+
+#[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     // Only allow safe URL schemes to prevent command injection via opener::open / ShellExecuteW
     if !url.starts_with("https://") && !url.starts_with("http://") && !url.starts_with("mailto:") {

@@ -8,7 +8,7 @@ import ToastContainer from "../components/ToastContainer";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { useConfirmStore } from "../stores/confirm.store";
 import { useComposeStore } from "../stores/compose.store";
-import { useUIStore, applyThemeToDom } from "../stores/ui.store";
+import { useUIStore, applyThemeToDom, resolveTheme } from "../stores/ui.store";
 import { useCommandStore } from "../stores/command.store";
 import { useKanbanStore } from "../stores/kanban.store";
 import { useKeyboard } from "../hooks/useKeyboard";
@@ -50,7 +50,7 @@ import i18next from "i18next";
 import { WifiOff } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
-import { setNotificationsEnabled as setBackendNotificationsEnabled } from "@/lib/api";
+import { setNotificationsEnabled as setBackendNotificationsEnabled, syncTitlebarTheme } from "@/lib/api";
 
 export default function Layout() {
   const activeView = useUIStore((s) => s.activeView);
@@ -111,9 +111,13 @@ export default function Layout() {
 
   useEffect(() => {
     applyThemeToDom(theme);
+    syncTitlebarTheme(resolveTheme(theme)).catch(() => {});
     if (theme === "system") {
       const mql = window.matchMedia("(prefers-color-scheme: dark)");
-      const listener = () => applyThemeToDom("system");
+      const listener = () => {
+        applyThemeToDom("system");
+        syncTitlebarTheme(resolveTheme("system")).catch(() => {});
+      };
       mql.addEventListener("change", listener);
       return () => mql.removeEventListener("change", listener);
     }

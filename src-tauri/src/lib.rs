@@ -285,6 +285,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(true);
                 let _ = window.set_title_bar_style(tauri::TitleBarStyle::Overlay);
+                let _ = window
+                    .set_background_color(Some(tauri::window::Color(0xf8, 0xf7, 0xf5, 0xff)));
             }
             app.manage(PendingMailtoUrls::default());
 
@@ -456,6 +458,7 @@ pub fn run() {
             commands::health::check_for_update,
             commands::health::open_external_url,
             commands::health::open_default_mail_settings,
+            commands::health::sync_titlebar_theme,
             commands::diagnostics::read_app_log,
             commands::appearance::import_background_image,
             commands::appearance::delete_background_image,

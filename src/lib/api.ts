@@ -343,6 +343,10 @@ export async function openDefaultMailSettings(): Promise<void> {
   return invoke<void>("open_default_mail_settings");
 }
 
+export async function syncTitlebarTheme(theme: string): Promise<void> {
+  return invoke<void>("sync_titlebar_theme", { theme });
+}
+
 export async function dismissFailedPendingMailOps(
   accountId: string | null,
 ): Promise<number> {
