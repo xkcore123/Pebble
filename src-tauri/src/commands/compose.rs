@@ -594,13 +594,32 @@ mod tests {
         let canonical_attachments_dir = attachments_dir.canonicalize().unwrap();
         assert!(staged.starts_with(&canonical_attachments_dir));
         assert_eq!(std::fs::read(&staged).unwrap(), b"payload");
-        assert!(staged
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap()
-            .ends_with("-quarterly_report_.txt"));
+        assert_eq!(
+            staged.file_name().and_then(|name| name.to_str()),
+            Some("quarterly_report_.txt")
+        );
 
         let _ = std::fs::remove_dir_all(attachments_dir);
+    }
+
+    #[test]
+    fn staged_browser_attachment_preserves_original_filename_in_local_record() {
+        let base = temp_attachments_dir("pebble-compose-upload-name");
+        let attachments_dir = base.join("attachments");
+        let staged = stage_compose_attachment_bytes(&attachments_dir, "report.pdf", b"payload")
+            .unwrap();
+
+        let records = stage_local_attachment_records(
+            &attachments_dir,
+            "message-1",
+            &[staged.to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].filename, "report.pdf");
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }
 
@@ -623,7 +642,14 @@ pub(crate) fn stage_compose_attachment_bytes(
         ))
     })?;
     let safe_filename = sanitize_stored_filename(filename);
-    let staged_path = canonical_staging_dir.join(format!("{}-{safe_filename}", new_id()));
+    let staged_dir = canonical_staging_dir.join(new_id());
+    std::fs::create_dir_all(&staged_dir).map_err(|e| {
+        PebbleError::Internal(format!(
+            "Failed to create compose attachment staging directory {}: {e}",
+            staged_dir.display()
+        ))
+    })?;
+    let staged_path = staged_dir.join(safe_filename);
     std::fs::write(&staged_path, bytes).map_err(|e| {
         PebbleError::Internal(format!(
             "Failed to stage compose attachment {}: {e}",

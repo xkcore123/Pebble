@@ -936,6 +936,53 @@ fn quote_mime_param(label: &str, value: &str) -> Result<String> {
     Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+fn rfc5987_encode(value: &str) -> String {
+    fn is_attr_char(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|'
+                    | b'~'
+            )
+    }
+
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        if is_attr_char(*byte) {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn ascii_filename_fallback(value: &str) -> String {
+    let fallback: String = value
+        .chars()
+        .map(|ch| if ch.is_ascii() && !ch.is_control() { ch } else { '_' })
+        .collect();
+    let trimmed = fallback.trim_matches('_').trim();
+    if trimmed.is_empty() {
+        "attachment".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn mime_filename_param(name: &str, label: &str, value: &str) -> Result<String> {
+    validate_header_value(label, value)?;
+    if value.is_ascii() {
+        return Ok(format!("{name}=\"{}\"", quote_mime_param(label, value)?));
+    }
+
+    let fallback = quote_mime_param(label, &ascii_filename_fallback(value))?;
+    Ok(format!(
+        "{name}=\"{fallback}\"; {name}*=UTF-8''{}",
+        rfc5987_encode(value)
+    ))
+}
+
 fn new_mime_boundary(prefix: &str) -> String {
     format!("{prefix}-{}", new_id())
 }
@@ -1035,7 +1082,10 @@ fn build_raw_message(msg: &OutgoingMessage) -> Result<Vec<u8>> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("attachment");
-            let filename = quote_mime_param("attachment filename", filename)?;
+            let content_type_filename =
+                mime_filename_param("name", "attachment filename", filename)?;
+            let content_disposition_filename =
+                mime_filename_param("filename", "attachment filename", filename)?;
             let data = match std::fs::read(path) {
                 Ok(d) => d,
                 Err(e) => {
@@ -1048,11 +1098,11 @@ fn build_raw_message(msg: &OutgoingMessage) -> Result<Vec<u8>> {
 
             raw.push_str(&format!("--{mixed_boundary}\r\n"));
             raw.push_str(&format!(
-                "Content-Type: {content_type}; name=\"{filename}\"\r\n"
+                "Content-Type: {content_type}; {content_type_filename}\r\n"
             ));
             raw.push_str("Content-Transfer-Encoding: base64\r\n");
             raw.push_str(&format!(
-                "Content-Disposition: attachment; filename=\"{filename}\"\r\n\r\n"
+                "Content-Disposition: attachment; {content_disposition_filename}\r\n\r\n"
             ));
             // Wrap base64 at 76 chars per line per RFC 2045
             for chunk in encoded.as_bytes().chunks(76) {
@@ -1539,6 +1589,34 @@ mod tests {
         };
 
         assert!(build_raw_message(&msg).is_err());
+    }
+
+    #[test]
+    fn build_raw_message_encodes_non_ascii_attachment_filename() {
+        let base = std::env::temp_dir().join(format!("pebble-gmail-attachment-{}", new_id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let attachment = base.join("报价单.pdf");
+        std::fs::write(&attachment, b"payload").unwrap();
+        let msg = OutgoingMessage {
+            to: vec![EmailAddress {
+                name: None,
+                address: "alice@example.com".to_string(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Attachment".to_string(),
+            body_text: "Body".to_string(),
+            body_html: None,
+            in_reply_to: None,
+            attachment_paths: vec![attachment.to_string_lossy().to_string()],
+        };
+
+        let raw = String::from_utf8(build_raw_message(&msg).unwrap()).unwrap();
+
+        assert!(raw.contains("filename*=UTF-8''%E6%8A%A5%E4%BB%B7%E5%8D%95.pdf"));
+        assert!(raw.contains("name*=UTF-8''%E6%8A%A5%E4%BB%B7%E5%8D%95.pdf"));
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
