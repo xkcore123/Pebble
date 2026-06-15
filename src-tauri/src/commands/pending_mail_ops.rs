@@ -372,7 +372,12 @@ async fn replay_remote_archive(
             let uid = parse_uid(message)?;
             let imap = connect_imap(state, &message.account_id).await?;
             let result = imap
-                .move_message(&source_remote_id, uid, &target_remote_id)
+                .move_message_with_dedup(
+                    &source_remote_id,
+                    uid,
+                    &target_remote_id,
+                    message.message_id_header.as_deref(),
+                )
                 .await;
             let _ = imap.disconnect().await;
             result
@@ -425,7 +430,12 @@ async fn replay_remote_restore(
             let uid = parse_uid(message)?;
             let imap = connect_imap(state, &message.account_id).await?;
             let result = imap
-                .move_message(&source_remote_id, uid, &target_remote_id)
+                .move_message_with_dedup(
+                    &source_remote_id,
+                    uid,
+                    &target_remote_id,
+                    message.message_id_header.as_deref(),
+                )
                 .await;
             let _ = imap.disconnect().await;
             result
@@ -480,8 +490,13 @@ async fn replay_remote_delete(
                 if trash_remote_id == source_remote_id {
                     imap.delete_message(&source_remote_id, uid).await
                 } else {
-                    imap.move_message(&source_remote_id, uid, &trash_remote_id)
-                        .await
+                    imap.move_message_with_dedup(
+                        &source_remote_id,
+                        uid,
+                        &trash_remote_id,
+                        message.message_id_header.as_deref(),
+                    )
+                    .await
                 }
             } else {
                 imap.delete_message(&source_remote_id, uid).await
@@ -530,7 +545,12 @@ async fn replay_remote_move_to_folder(
             let uid = parse_uid(message)?;
             let imap = connect_imap(state, &message.account_id).await?;
             let result = imap
-                .move_message(&source_remote_id, uid, &target_remote_id)
+                .move_message_with_dedup(
+                    &source_remote_id,
+                    uid,
+                    &target_remote_id,
+                    message.message_id_header.as_deref(),
+                )
                 .await;
             let _ = imap.disconnect().await;
             result

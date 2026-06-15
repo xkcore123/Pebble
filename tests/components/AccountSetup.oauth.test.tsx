@@ -209,4 +209,50 @@ describe("AccountSetup OAuth", () => {
       );
     });
   });
+
+  it("allows manual IMAP account submission with an empty username", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AccountSetup onClose={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.change(screen.getByLabelText("Email address"), {
+      target: { value: "user@hotmail.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Display name"), {
+      target: { value: "Hotmail" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Outlook" }));
+    fireEvent.change(screen.getByLabelText("Username"), {
+      target: { value: "" },
+    });
+    fireEvent.change(screen.getByLabelText("Password / App password"), {
+      target: { value: "app-password" },
+    });
+
+    expect((screen.getByLabelText("Username") as HTMLInputElement).required).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Account & Sync" }));
+
+    await waitFor(() => {
+      expect(addAccount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          email: "user@hotmail.com",
+          display_name: "Hotmail",
+          provider: "imap",
+          imap_host: "outlook.office365.com",
+          smtp_host: "smtp.office365.com",
+          username: "",
+          password: "app-password",
+        }),
+      );
+    });
+  });
 });

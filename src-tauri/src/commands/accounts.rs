@@ -290,6 +290,17 @@ impl std::fmt::Debug for AddAccountRequest {
     }
 }
 
+/// Resolve the login username for IMAP/SMTP, defaulting to the account email
+/// when left blank (the common case where the mail login equals the address).
+/// Applied on both account creation and update so the two paths stay consistent.
+fn resolve_username(username: &str, email: &str) -> String {
+    if username.is_empty() {
+        email.to_string()
+    } else {
+        username.to_string()
+    }
+}
+
 #[tauri::command]
 pub async fn add_account(
     state: State<'_, AppState>,
@@ -335,13 +346,16 @@ pub async fn add_account(
         };
         let proxy = proxy.map(mail_proxy_from_http);
 
+        // Login username defaults to the email address when left blank.
+        let username = resolve_username(&request.username, &request.email);
+
         // Build typed IMAP + SMTP credentials
         let credentials = AccountCredentials {
             proxy_mode,
             imap: ImapConfig {
                 host: request.imap_host,
                 port: request.imap_port,
-                username: request.username.clone(),
+                username: username.clone(),
                 password: request.password.clone(),
                 security: request.imap_security,
                 accept_invalid_certs: request.accept_invalid_certs,
@@ -350,7 +364,7 @@ pub async fn add_account(
             smtp: SmtpConfig {
                 host: request.smtp_host,
                 port: request.smtp_port,
-                username: request.username,
+                username,
                 password: request.password,
                 security: request.smtp_security,
                 accept_invalid_certs: request.accept_invalid_certs,
@@ -492,9 +506,7 @@ pub async fn update_account(
         };
         creds.imap.proxy = proxy.clone();
     }
-    if creds.imap.username.is_empty() {
-        creds.imap.username = email.clone();
-    }
+    creds.imap.username = resolve_username(&creds.imap.username, &email);
 
     // SMTP side
     if let Some(h) = smtp_host {
@@ -516,9 +528,7 @@ pub async fn update_account(
     if let Some(proxy) = updated_proxy {
         creds.smtp.proxy = proxy;
     }
-    if creds.smtp.username.is_empty() {
-        creds.smtp.username = email.clone();
-    }
+    creds.smtp.username = resolve_username(&creds.smtp.username, &email);
 
     let incoming_label = if provider == ProviderType::Pop3 {
         "POP3"
@@ -878,6 +888,19 @@ pub async fn delete_account(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_username_defaults_empty_to_email() {
+        assert_eq!(resolve_username("", "user@example.com"), "user@example.com");
+    }
+
+    #[test]
+    fn resolve_username_keeps_non_empty() {
+        assert_eq!(
+            resolve_username("legacy-login", "user@example.com"),
+            "legacy-login"
+        );
+    }
 
     #[test]
     fn rejects_plaintext_security_for_remote_hosts() {

@@ -2,7 +2,7 @@ use pebble_core::{build_snippet, PebbleError, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
 
-const CURRENT_VERSION: u32 = 13;
+const CURRENT_VERSION: u32 = 14;
 const ACCOUNT_COLOR_PRESETS: [&str; 12] = [
     "#0ea5e9", "#22c55e", "#f59e0b", "#8b5cf6", "#f43f5e", "#14b8a6", "#6366f1", "#f97316",
     "#06b6d4", "#ec4899", "#84cc16", "#3b82f6",
@@ -396,6 +396,45 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             .map_err(|e| PebbleError::Storage(format!("Migration V13 commit failed: {e}")))?;
     }
 
+    // V14: enforce at most one LIVE row per (account_id, remote_id). The legacy
+    // idx_messages_account_remote index was non-unique, so a soft-delete followed
+    // by a re-sync that re-fetched the same remote_id inserted a second row
+    // (tombstone + new live copy). Deduplicate existing live rows first, then
+    // replace the index with a partial UNIQUE index scoped to is_deleted = 0 so
+    // tombstones (is_deleted = 1) can still coexist with a fresh live copy.
+    if version < 14 {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| PebbleError::Storage(format!("Migration V14 begin failed: {e}")))?;
+        // The messages table always exists in production (created in SCHEMA_V1).
+        // Guard the dedup/index so the migration is a no-op on the minimal
+        // schemas used by migration unit tests that omit messages — and is
+        // harmless if a future store variant lacks it.
+        let messages_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if messages_count > 0 {
+            tx.execute_batch(
+                "DELETE FROM messages
+                 WHERE is_deleted = 0
+                   AND id NOT IN (
+                     SELECT MIN(id) FROM messages WHERE is_deleted = 0 GROUP BY account_id, remote_id
+                   );
+                 DROP INDEX IF EXISTS idx_messages_account_remote;
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_account_remote_unique
+                   ON messages(account_id, remote_id) WHERE is_deleted = 0;",
+            )
+            .map_err(|e| PebbleError::Storage(format!("Migration V14 failed: {e}")))?;
+        }
+        set_schema_version(&tx, 14)?;
+        tx.commit()
+            .map_err(|e| PebbleError::Storage(format!("Migration V14 commit failed: {e}")))?;
+    }
+
     Ok(())
 }
 
@@ -567,6 +606,82 @@ mod tests {
         assert_eq!(version, CURRENT_VERSION);
         conn.prepare("SELECT color FROM accounts LIMIT 0")
             .expect("accounts.color should exist after V11");
+    }
+
+    #[test]
+    fn migration_v14_dedups_live_rows_and_enforces_partial_unique_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Minimal messages shape at the V13 boundary: only the columns V14
+        // touches. run_migrations from user_version=13 runs just the V14 block.
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                remote_id TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX idx_messages_account_remote ON messages(account_id, remote_id);
+            PRAGMA user_version = 13;",
+        )
+        .unwrap();
+
+        // Two LIVE duplicates of the same remote message, one tombstone for it,
+        // and one unrelated live row.
+        conn.execute_batch(
+            "INSERT INTO messages (id, account_id, remote_id, is_deleted) VALUES
+                ('m-dup-a', 'acct', 'UID:42', 0),
+                ('m-dup-b', 'acct', 'UID:42', 0),
+                ('m-tomb',  'acct', 'UID:42', 1),
+                ('m-other', 'acct', 'UID:99', 0);",
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_VERSION);
+
+        // Duplicate live rows collapse to one; the tombstone survives; the
+        // unrelated live row is untouched.
+        let live_42: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE account_id='acct' AND remote_id='UID:42' AND is_deleted=0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live_42, 1, "duplicate live rows should be collapsed to one");
+
+        let tomb_survives: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE id='m-tomb'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tomb_survives, 1, "tombstone must not be removed by dedup");
+
+        // Partial unique index: a second LIVE row with the same key is rejected,
+        // but an additional tombstone (is_deleted=1) is still allowed.
+        let dup_live = conn.execute(
+            "INSERT INTO messages (id, account_id, remote_id, is_deleted) VALUES ('m-extra','acct','UID:42',0)",
+            [],
+        );
+        assert!(
+            dup_live.is_err(),
+            "second live row must be rejected by the partial unique index"
+        );
+
+        let dup_tomb = conn.execute(
+            "INSERT INTO messages (id, account_id, remote_id, is_deleted) VALUES ('m-tomb2','acct','UID:42',1)",
+            [],
+        );
+        assert!(
+            dup_tomb.is_ok(),
+            "additional tombstone must be allowed alongside one live row"
+        );
     }
 
     #[test]

@@ -364,7 +364,7 @@ pub fn run() {
             let store_for_reindex = state.store.clone();
             let search_for_reindex = state.search.clone();
             let app_for_reindex = app_handle.clone();
-            tauri::async_runtime::spawn_blocking(move || {
+            let reindex_handle = tauri::async_runtime::spawn_blocking(move || {
                 // 1. Process any pending search ops left over from a previous crash.
                 let pending = store_for_reindex.list_search_pending().unwrap_or_default();
                 if !pending.is_empty() {
@@ -428,20 +428,31 @@ pub fn run() {
                 }
             });
 
-            // Auto-resume sync for all existing accounts
-            let app_for_sync = app_handle.clone();
+            // Start the long-lived workers only after the background reindex
+            // finishes. do_reindex calls clear_index() then rebuilds from a DB
+            // snapshot; running sync workers concurrently could index a freshly
+            // stored message whose document is then wiped and missed by the
+            // snapshot, leaving it permanently unsearchable. On a normal launch
+            // the reindex task only does the cheap pending-recovery + count
+            // check (no rebuild), so this ordering adds latency only on
+            // schema-upgrade launches.
+            let app_for_workers = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                commands::sync_cmd::resume_all_syncs(app_for_sync).await;
-            });
-
-            let app_for_pending_ops = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                commands::pending_mail_ops::run_pending_mail_ops_worker(app_for_pending_ops).await;
-            });
-
-            let app_for_auto_backup = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                commands::cloud_sync::run_auto_backup_worker(app_for_auto_backup).await;
+                if let Err(e) = reindex_handle.await {
+                    tracing::error!("Background reindex task join failed: {e}");
+                }
+                let app_for_sync = app_for_workers.clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::sync_cmd::resume_all_syncs(app_for_sync).await;
+                });
+                let app_for_pending_ops = app_for_workers.clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::pending_mail_ops::run_pending_mail_ops_worker(app_for_pending_ops)
+                        .await;
+                });
+                tauri::async_runtime::spawn(async move {
+                    commands::cloud_sync::run_auto_backup_worker(app_for_workers).await;
+                });
             });
             log_startup_phase(startup_start, &mut startup_phase, "background workers scheduled");
             tracing::info!(

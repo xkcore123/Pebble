@@ -1463,11 +1463,30 @@ impl ImapProvider {
     /// Move a message by UID from one mailbox to another.
     ///
     /// Tries IMAP MOVE (uid_mv) first, falls back to UID COPY + UID STORE \Deleted + EXPUNGE.
+    /// One-shot wrapper around [`move_message_with_dedup`] with retry-dedup disabled.
     pub async fn move_message(
         &self,
         source_mailbox: &str,
         uid: u32,
         dest_mailbox: &str,
+    ) -> Result<()> {
+        self.move_message_with_dedup(source_mailbox, uid, dest_mailbox, None)
+            .await
+    }
+
+    /// Move a message by UID with an idempotent COPY fallback.
+    ///
+    /// Pass the message's `Message-ID` header so that, on retry after a partial
+    /// COPY/EXPUNGE failure, the destination is searched for a matching copy
+    /// before COPY runs — preventing duplicate messages. `None` or an empty
+    /// header disables the check (one-shot move). `STORE \Deleted` + `EXPUNGE`
+    /// are always run and are themselves idempotent.
+    pub async fn move_message_with_dedup(
+        &self,
+        source_mailbox: &str,
+        uid: u32,
+        dest_mailbox: &str,
+        message_id_header: Option<&str>,
     ) -> Result<()> {
         let uid_str = uid.to_string();
 
@@ -1506,7 +1525,43 @@ impl ImapProvider {
                             uid
                         );
 
-                        // Re-select in case MOVE attempt changed state
+                        // Idempotency: on retry after a partial COPY/EXPUNGE
+                        // failure the destination may already hold a copy (COPY
+                        // preserves the Message-ID header). Search the dest and
+                        // skip COPY if a match is found, so a retried move does
+                        // not create duplicates. Any error here is treated as
+                        // "no match" (fall through to COPY) — never block the move.
+                        let mut already_copied = false;
+                        if let Some(h) = message_id_header {
+                            if !h.is_empty() {
+                                let criteria = format!(
+                                    "HEADER \"Message-ID\" \"{}\"",
+                                    h.replace('\\', "\\\\").replace('"', "\\\"")
+                                );
+                                let dest_selected = with_imap_timeout(
+                                    "SELECT",
+                                    IMAP_COMMAND_TIMEOUT_SECS,
+                                    $s.select(dest_mailbox),
+                                )
+                                .await
+                                .is_ok();
+                                if dest_selected {
+                                    already_copied = match with_imap_timeout(
+                                        "UID SEARCH",
+                                        IMAP_COMMAND_TIMEOUT_SECS,
+                                        $s.uid_search(criteria.as_str()),
+                                    )
+                                    .await
+                                    {
+                                        Ok(hits) => hits.into_iter().next().is_some(),
+                                        Err(_) => false,
+                                    };
+                                }
+                            }
+                        }
+
+                        // Re-select source (restores selection after the dest
+                        // search above and in case the MOVE attempt changed state).
                         with_imap_timeout(
                             "SELECT",
                             IMAP_COMMAND_TIMEOUT_SECS,
@@ -1514,12 +1569,14 @@ impl ImapProvider {
                         )
                         .await?;
 
-                        with_imap_timeout(
-                            "UID COPY",
-                            IMAP_COMMAND_TIMEOUT_SECS,
-                            $s.uid_copy(&uid_str, dest_mailbox),
-                        )
-                        .await?;
+                        if !already_copied {
+                            with_imap_timeout(
+                                "UID COPY",
+                                IMAP_COMMAND_TIMEOUT_SECS,
+                                $s.uid_copy(&uid_str, dest_mailbox),
+                            )
+                            .await?;
+                        }
 
                         let store_result = with_imap_timeout(
                             "STORE \\Deleted",

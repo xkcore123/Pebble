@@ -641,7 +641,6 @@ export default function AccountSetup({ onClose }: Props) {
                 autoComplete="username"
                 style={inputStyle}
                 type="text"
-                required
                 value={form.username}
                 onChange={(e) => handleChange("username", e.target.value)}
                 placeholder={t("accountSetup.usernameHint", "Defaults to email address")}
