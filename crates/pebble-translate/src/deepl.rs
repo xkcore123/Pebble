@@ -79,9 +79,7 @@ mod tests {
     use super::*;
 
     fn form_get<'a>(form: &'a [(String, String)], key: &str) -> Option<&'a str> {
-        form.iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+        form.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 
     #[test]

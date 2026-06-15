@@ -941,8 +941,7 @@ fn rfc5987_encode(value: &str) -> String {
         byte.is_ascii_alphanumeric()
             || matches!(
                 byte,
-                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|'
-                    | b'~'
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
             )
     }
 
@@ -960,7 +959,13 @@ fn rfc5987_encode(value: &str) -> String {
 fn ascii_filename_fallback(value: &str) -> String {
     let fallback: String = value
         .chars()
-        .map(|ch| if ch.is_ascii() && !ch.is_control() { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii() && !ch.is_control() {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect();
     let trimmed = fallback.trim_matches('_').trim();
     if trimmed.is_empty() {
@@ -1094,7 +1099,7 @@ fn build_raw_message(msg: &OutgoingMessage) -> Result<Vec<u8>> {
                 }
             };
             let encoded = base64_standard_encode(&data);
-            let content_type = guess_mime_type(&filename);
+            let content_type = guess_mime_type(filename);
 
             raw.push_str(&format!("--{mixed_boundary}\r\n"));
             raw.push_str(&format!(

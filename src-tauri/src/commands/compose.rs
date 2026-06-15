@@ -606,8 +606,8 @@ mod tests {
     fn staged_browser_attachment_preserves_original_filename_in_local_record() {
         let base = temp_attachments_dir("pebble-compose-upload-name");
         let attachments_dir = base.join("attachments");
-        let staged = stage_compose_attachment_bytes(&attachments_dir, "report.pdf", b"payload")
-            .unwrap();
+        let staged =
+            stage_compose_attachment_bytes(&attachments_dir, "report.pdf", b"payload").unwrap();
 
         let records = stage_local_attachment_records(
             &attachments_dir,
