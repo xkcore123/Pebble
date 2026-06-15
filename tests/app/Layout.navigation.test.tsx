@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => {
     settingsViewPromise,
     invalidateQueries: vi.fn(),
     setNotificationsEnabled: vi.fn().mockResolvedValue(undefined),
+    syncTitlebarTheme: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -43,6 +44,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("../../src/lib/api", () => ({
   setNotificationsEnabled: mocks.setNotificationsEnabled,
+  syncTitlebarTheme: mocks.syncTitlebarTheme,
 }));
 
 vi.mock("../../src/components/TitleBar", () => ({
