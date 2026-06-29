@@ -37,6 +37,7 @@ if ($dirty) {
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "pebble-patches-$([guid]::NewGuid().ToString('N'))"
 $managedPaths = @(
+    ".gitattributes",
     "patches",
     "scripts/update-and-apply-patches.ps1",
     ".github/workflows/auto-patch.yml"
@@ -110,7 +111,7 @@ try {
         Copy-Item -LiteralPath $src -Destination (Join-Path $repoRoot $path) -Recurse -Force
     }
 
-    Invoke-Git add patches scripts/update-and-apply-patches.ps1 .github/workflows/auto-patch.yml
+    Invoke-Git add .gitattributes patches scripts/update-and-apply-patches.ps1 .github/workflows/auto-patch.yml
 
     if (Test-Git diff --cached --quiet) {
         Write-Host "No patch changes to commit."
