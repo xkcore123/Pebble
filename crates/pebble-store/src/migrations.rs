@@ -848,8 +848,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            old_index_count,
-            0,
+            old_index_count, 0,
             "old account-scoped index must be dropped"
         );
 
