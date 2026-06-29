@@ -3,9 +3,10 @@ name: Sync upstream and apply patches
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 20 * * *"
+    - cron: "17 20 * * 0"
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -30,5 +31,32 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Sync upstream and apply patches
+        id: sync
         shell: pwsh
         run: ./scripts/update-and-apply-patches.ps1 -Push
+
+      - name: Create patched release tag
+        if: steps.sync.outputs.upstream_changed == 'true'
+        id: tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
+          $tag = "v$version-patched.$timestamp"
+
+          git fetch origin --tags
+          if (git rev-parse -q --verify "refs/tags/$tag") {
+            throw "Tag '$tag' already exists."
+          }
+
+          git tag -a $tag -m "Pebble $tag"
+          git push origin $tag
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Trigger Windows release
+        if: steps.sync.outputs.upstream_changed == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref "${{ steps.tag.outputs.tag }}" -f tag="${{ steps.tag.outputs.tag }}"

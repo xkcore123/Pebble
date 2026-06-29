@@ -66,9 +66,25 @@ describe("Windows release configuration", () => {
     expect(releaseWorkflow).toContain("pnpm build:windows");
     expect(releaseWorkflow).toContain("target/release/bundle/nsis");
     expect(releaseWorkflow).toContain("pebble-windows-${{ env.PEBBLE_VERSION }}");
+    expect(releaseWorkflow).toContain("vMAJOR.MINOR.PATCH-patched.YYYYMMDDHHMMSS");
+    expect(releaseWorkflow).toContain("--prerelease");
     expect(releaseWorkflow).not.toContain("Linux Package Release");
     expect(releaseWorkflow).not.toContain("macOS Release");
     expect(releaseWorkflow).not.toContain("*.AppImage");
     expect(releaseWorkflow).not.toContain("*.dmg");
+  });
+
+  it("syncs upstream weekly and dispatches Windows releases only after updates", () => {
+    const autoPatchWorkflow = readFileSync(
+      resolve(process.cwd(), ".github", "workflows", "auto-patch.yml"),
+      "utf8",
+    );
+
+    expect(autoPatchWorkflow).toContain('cron: "17 20 * * 0"');
+    expect(autoPatchWorkflow).toContain("actions: write");
+    expect(autoPatchWorkflow).toContain("id: sync");
+    expect(autoPatchWorkflow).toContain("steps.sync.outputs.upstream_changed == 'true'");
+    expect(autoPatchWorkflow).toContain("gh workflow run release.yml");
+    expect(autoPatchWorkflow).toContain("patched.");
   });
 });

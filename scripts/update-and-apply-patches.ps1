@@ -24,6 +24,17 @@ function Test-Git {
     return $LASTEXITCODE -eq 0
 }
 
+function Set-ActionOutput {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+
+    if ($env:GITHUB_OUTPUT) {
+        "$Name=$Value" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    }
+}
+
 $repoRoot = (& git rev-parse --show-toplevel).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
     throw "This script must run inside a git repository."
@@ -65,6 +76,22 @@ try {
     }
 
     Invoke-Git fetch $Remote $Branch
+
+    $currentHead = (& git rev-parse HEAD).Trim()
+    $upstreamHead = (& git rev-parse "$Remote/$Branch").Trim()
+    Set-ActionOutput "current_head" $currentHead
+    Set-ActionOutput "upstream_head" $upstreamHead
+
+    if (Test-Git merge-base --is-ancestor $upstreamHead HEAD) {
+        Write-Host "No upstream updates found. Current branch already contains $Remote/$Branch."
+        Set-ActionOutput "upstream_changed" "false"
+        Set-ActionOutput "commit_created" "false"
+        Set-ActionOutput "pushed" "false"
+        Set-ActionOutput "patched_head" $currentHead
+        return
+    }
+
+    Set-ActionOutput "upstream_changed" "true"
     Invoke-Git reset --hard "$Remote/$Branch"
     Invoke-Git clean -fd
 
@@ -115,12 +142,20 @@ try {
 
     if (Test-Git diff --cached --quiet) {
         Write-Host "No patch changes to commit."
+        Set-ActionOutput "commit_created" "false"
     } else {
         Invoke-Git commit -m "chore: sync upstream and apply local patches"
+        Set-ActionOutput "commit_created" "true"
     }
 
+    $patchedHead = (& git rev-parse HEAD).Trim()
+    Set-ActionOutput "patched_head" $patchedHead
+
     if ($Push) {
-        Invoke-Git push origin "HEAD:$Branch"
+        Invoke-Git push --force-with-lease origin "HEAD:$Branch"
+        Set-ActionOutput "pushed" "true"
+    } else {
+        Set-ActionOutput "pushed" "false"
     }
 } finally {
     if (Test-Path -LiteralPath $tempRoot) {
