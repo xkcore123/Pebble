@@ -77,14 +77,20 @@ try {
         throw "No patch files found in patches/."
     }
 
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
     foreach ($patch in $patches) {
-        if (Test-Git apply --check --index $patch.FullName) {
-            Invoke-Git apply --index $patch.FullName
+        $normalizedPatch = Join-Path $tempRoot "normalized-$($patch.Name)"
+        $patchText = [System.IO.File]::ReadAllText($patch.FullName) -replace "`r`n", "`n"
+        [System.IO.File]::WriteAllText($normalizedPatch, $patchText, $utf8NoBom)
+
+        if (Test-Git apply --check --index $normalizedPatch) {
+            Invoke-Git apply --index $normalizedPatch
             Write-Host "Applied patch $($patch.Name)"
             continue
         }
 
-        if (Test-Git apply --reverse --check $patch.FullName) {
+        if (Test-Git apply --reverse --check $normalizedPatch) {
             Write-Host "Patch $($patch.Name) is already present upstream; skipping"
             continue
         }
