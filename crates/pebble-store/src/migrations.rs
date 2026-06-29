@@ -847,7 +847,11 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(old_index_count, 0, "old account-scoped index must be dropped");
+        assert_eq!(
+            old_index_count,
+            0,
+            "old account-scoped index must be dropped"
+        );
 
         conn.execute(
             "INSERT INTO messages (id, account_id, remote_id, is_deleted)

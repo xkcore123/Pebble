@@ -3,15 +3,13 @@ import { pathToFileURL } from "node:url";
 
 const BUNDLE_TARGETS_BY_PLATFORM = {
   win32: "nsis",
-  darwin: "app,dmg",
-  linux: "appimage,deb,rpm",
 };
 
 export function bundleTargetsForPlatform(platform = process.platform) {
   const targets = BUNDLE_TARGETS_BY_PLATFORM[platform];
   if (!targets) {
     throw new Error(
-      `Unsupported desktop package platform '${platform}'. Use pnpm tauri build --bundles <targets> for this platform.`,
+      `Unsupported desktop package platform '${platform}'. This fork only builds Windows installers.`,
     );
   }
   return targets;
