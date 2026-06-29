@@ -1412,6 +1412,35 @@ mod remote_id_scope_tests {
     }
 
     #[test]
+    fn insert_message_allows_same_remote_id_in_different_folders() {
+        let store = Store::open_in_memory().unwrap();
+        let account = make_account();
+        store.insert_account(&account).unwrap();
+
+        let inbox = make_folder(&account.id, "INBOX", FolderRole::Inbox, 0);
+        let trash = make_folder(&account.id, "Trash", FolderRole::Trash, 1);
+        store.insert_folder(&inbox).unwrap();
+        store.insert_folder(&trash).unwrap();
+
+        let inbox_msg = make_message(&account.id, "492");
+        store
+            .insert_message(&inbox_msg, std::slice::from_ref(&inbox.id))
+            .unwrap();
+
+        let trash_msg = make_message(&account.id, "492");
+        store
+            .insert_message(&trash_msg, std::slice::from_ref(&trash.id))
+            .expect("IMAP UIDs are scoped to a folder");
+
+        let dup_inbox_msg = make_message(&account.id, "492");
+        let duplicate = store.insert_message(&dup_inbox_msg, std::slice::from_ref(&inbox.id));
+        assert!(
+            duplicate.is_err(),
+            "duplicate live remote_id in the same folder should still be rejected"
+        );
+    }
+
+    #[test]
     fn update_remote_id_reports_missing_message() {
         let store = Store::open_in_memory().unwrap();
 

@@ -1,14 +1,8 @@
 import { useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useUIStore } from "@/stores/ui.store";
-import { startSync, stopSync } from "@/lib/api";
-import { useAccountsQuery } from "@/hooks/queries";
 
 export function useCloseToBackground() {
-  const { data: accounts } = useAccountsQuery();
-  const pollInterval = useUIStore((s) => s.pollInterval);
-  const realtimeMode = useUIStore((s) => s.realtimeMode);
-
   useEffect(() => {
     const appWindow = getCurrentWindow();
     let unlisten: (() => void) | undefined;
@@ -23,13 +17,6 @@ export function useCloseToBackground() {
         event.preventDefault();
         void appWindow
           .hide()
-          .then(() => {
-            // Lightweight mode: stop all sync workers to reduce resource usage
-            const ids = accounts?.map((a) => a.id) ?? [];
-            for (const id of ids) {
-              stopSync(id).catch(() => {});
-            }
-          })
           .catch((err) => console.warn("Failed to hide window on close", err));
       })
       .then((fn) => {
@@ -45,35 +32,5 @@ export function useCloseToBackground() {
       disposed = true;
       unlisten?.();
     };
-  }, [accounts]);
-
-  // Resume sync workers when window regains visibility after being hidden to tray
-  useEffect(() => {
-    const appWindow = getCurrentWindow();
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-
-    appWindow
-      .onFocusChanged(({ payload: focused }) => {
-        if (!focused) return;
-        if (realtimeMode === "manual") return;
-        const ids = accounts?.map((a) => a.id) ?? [];
-        for (const id of ids) {
-          startSync(id, pollInterval).catch(() => {});
-        }
-      })
-      .then((fn) => {
-        if (disposed) {
-          fn();
-          return;
-        }
-        unlisten = fn;
-      })
-      .catch(() => {});
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [accounts, pollInterval, realtimeMode]);
+  }, []);
 }
