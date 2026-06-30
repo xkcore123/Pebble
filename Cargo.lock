@@ -3643,6 +3643,7 @@ name = "pebble-privacy"
 version = "0.1.2"
 dependencies = [
  "ammonia",
+ "htmlescape",
  "lol_html",
  "pebble-core",
  "thiserror 2.0.18",
