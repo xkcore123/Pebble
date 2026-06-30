@@ -165,6 +165,7 @@ export async function testImapConnection(
   proxyPort?: number,
   username?: string,
   password?: string,
+  email?: string,
 ): Promise<string> {
   return invoke<string>("test_imap_connection", {
     request: {
@@ -176,6 +177,7 @@ export async function testImapConnection(
       proxy_port: proxyPort,
       username,
       password,
+      email,
     },
   });
 }

@@ -191,6 +191,7 @@ export default function AccountSetup({ onClose }: Props) {
               form.proxy_port,
               form.username || undefined,
               form.password || undefined,
+              form.email || undefined,
             );
       setTestResult({ ok: true, message: report });
     } catch (err) {
