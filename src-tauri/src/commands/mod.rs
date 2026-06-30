@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod advanced_search;
 pub mod appearance;
 pub mod attachments;
+pub mod autostart;
 pub mod batch;
 pub mod cloud_sync;
 pub mod compose;

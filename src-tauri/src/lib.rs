@@ -237,6 +237,10 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             restore_main_window(app);
         }));
+        builder = builder.plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None::<Vec<&str>>,
+        ));
     }
 
     builder
@@ -465,6 +469,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_tray_menu_labels,
             take_pending_mailto_urls,
+            commands::autostart::get_autostart_enabled,
+            commands::autostart::set_autostart_enabled,
             commands::health::health_check,
             commands::health::check_for_update,
             commands::health::open_external_url,

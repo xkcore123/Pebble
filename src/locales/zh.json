@@ -186,6 +186,8 @@
     "testNotificationSent": "测试通知已发送",
     "testNotificationFailed": "测试通知发送失败",
     "startupBehavior": "启动行为",
+    "launchAtStartup": "开机时自动启动 Pebble",
+    "autostartFailed": "更新开机自启动失败",
     "startHiddenToTray": "启动时隐藏到托盘",
     "closeBehavior": "关闭行为",
     "quitOnClose": "关闭窗口时退出应用",
