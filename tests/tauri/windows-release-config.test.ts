@@ -68,9 +68,11 @@ describe("Windows release configuration", () => {
     expect(releaseWorkflow).toContain("pebble-windows-${{ env.PEBBLE_VERSION }}");
     expect(releaseWorkflow).toContain("vMAJOR.MINOR.PATCH-patched.YYYYMMDDHHMMSS");
     expect(releaseWorkflow).toContain("--prerelease");
-    expect(releaseWorkflow).toContain("Report OAuth build config");
-    expect(releaseWorkflow).toContain("Write-Warning");
-    expect(releaseWorkflow).not.toContain("throw \"$name is not configured");
+    expect(releaseWorkflow).toContain("Validate OAuth build config");
+    expect(releaseWorkflow).toContain('foreach ($name in @("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "MICROSOFT_CLIENT_ID"))');
+    expect(releaseWorkflow).toContain('throw "$name is not configured in the \'action\' GitHub environment."');
+    expect(releaseWorkflow).toContain("MICROSOFT_CLIENT_SECRET is not configured; continuing with the public/native Microsoft client.");
+    expect(releaseWorkflow).not.toContain("OAuth sign-in can still be configured at runtime with .env");
     expect(releaseWorkflow).not.toContain("Linux Package Release");
     expect(releaseWorkflow).not.toContain("macOS Release");
     expect(releaseWorkflow).not.toContain("*.AppImage");

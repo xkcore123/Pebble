@@ -79,7 +79,7 @@ jobs:
           }
           "PEBBLE_VERSION=$($tag.Substring(1))" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Report OAuth build config
+      - name: Validate OAuth build config
         env:
           GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -87,18 +87,17 @@ jobs:
           MICROSOFT_CLIENT_SECRET: ${{ secrets.MICROSOFT_CLIENT_SECRET }}
         run: |
           $ErrorActionPreference = "Stop"
-          $missing = @()
-          foreach ($name in @("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET")) {
+          foreach ($name in @("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "MICROSOFT_CLIENT_ID")) {
             $value = [Environment]::GetEnvironmentVariable($name)
             if ([string]::IsNullOrWhiteSpace($value)) {
-              $missing += $name
+              throw "$name is not configured in the 'action' GitHub environment."
             }
           }
-          if ($missing.Count -gt 0) {
-            Write-Warning "OAuth build variables not configured in the 'action' GitHub environment: $($missing -join ', '). OAuth sign-in can still be configured at runtime with .env."
-          } else {
-            "OAuth build variables are configured for this release build."
+
+          if ([string]::IsNullOrWhiteSpace($env:MICROSOFT_CLIENT_SECRET)) {
+            "MICROSOFT_CLIENT_SECRET is not configured; continuing with the public/native Microsoft client."
           }
+          "OAuth client IDs and Google client secret are configured for this release build."
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
