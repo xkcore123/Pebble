@@ -1,20 +1,8 @@
-From 22ff3154a79e71ea3444477d1722f274fef589ee Mon Sep 17 00:00:00 2001
-From: xkcore123 <xkcore123@users.noreply.github.com>
-Date: Mon, 29 Jun 2026 18:50:07 +0800
-Subject: [PATCH] fix: keep background sync and scope IMAP UIDs by folder
-
----
- crates/pebble-store/src/messages.rs     |  29 +++
- crates/pebble-store/src/migrations.rs   | 289 ++++++++++++++++++++----
- src/app/useCloseToBackground.ts         |  45 +---
- tests/app/useCloseToBackground.test.tsx |  43 +---
- 4 files changed, 273 insertions(+), 133 deletions(-)
-
 diff --git a/crates/pebble-store/src/messages.rs b/crates/pebble-store/src/messages.rs
-index 9700903..5b3ccce 100644
+index 9700903..6230040 100644
 --- a/crates/pebble-store/src/messages.rs
 +++ b/crates/pebble-store/src/messages.rs
-@@ -1411,6 +1411,35 @@ mod remote_id_scope_tests {
+@@ -1411,6 +1411,70 @@ mod remote_id_scope_tests {
          assert!(!sent_matches.contains("123"));
      }
  
@@ -47,11 +35,46 @@ index 9700903..5b3ccce 100644
 +        );
 +    }
 +
++    #[test]
++    fn move_message_to_folder_rejects_duplicate_remote_id_in_target_folder() {
++        let store = Store::open_in_memory().unwrap();
++        let account = make_account();
++        store.insert_account(&account).unwrap();
++
++        let inbox = make_folder(&account.id, "INBOX", FolderRole::Inbox, 0);
++        let trash = make_folder(&account.id, "Trash", FolderRole::Trash, 1);
++        store.insert_folder(&inbox).unwrap();
++        store.insert_folder(&trash).unwrap();
++
++        let inbox_msg = make_message(&account.id, "496");
++        store
++            .insert_message(&inbox_msg, std::slice::from_ref(&inbox.id))
++            .unwrap();
++
++        let trash_msg = make_message(&account.id, "496");
++        store
++            .insert_message(&trash_msg, std::slice::from_ref(&trash.id))
++            .unwrap();
++
++        let duplicate_target = store.move_message_to_folder(&inbox_msg.id, &trash.id);
++        assert!(
++            duplicate_target.is_err(),
++            "same IMAP UID cannot become live twice in one target folder"
++        );
++
++        let folder_ids = store.get_message_folder_ids(&inbox_msg.id).unwrap();
++        assert_eq!(
++            folder_ids,
++            vec![inbox.id],
++            "failed moves should leave the original folder association intact"
++        );
++    }
++
      #[test]
      fn update_remote_id_reports_missing_message() {
          let store = Store::open_in_memory().unwrap();
 diff --git a/crates/pebble-store/src/migrations.rs b/crates/pebble-store/src/migrations.rs
-index ed08363..46c550f 100644
+index ed08363..60f2196 100644
 --- a/crates/pebble-store/src/migrations.rs
 +++ b/crates/pebble-store/src/migrations.rs
 @@ -2,7 +2,7 @@ use pebble_core::{build_snippet, PebbleError, Result};
@@ -289,6 +312,24 @@ index ed08363..46c550f 100644
 -        // unrelated live row is untouched.
 -        let live_42: i64 = conn
 +        let inbox_live_42: i64 = conn
++            .query_row(
++                "SELECT COUNT(*)
++                 FROM messages m
++                 JOIN message_folders mf ON mf.message_id = m.id
++                 WHERE m.account_id='acct'
++                   AND m.remote_id='UID:42'
++                   AND m.is_deleted=0
++                   AND mf.folder_id='inbox'",
++                [],
++                |row| row.get(0),
++            )
++            .unwrap();
++        assert_eq!(
++            inbox_live_42, 1,
++            "duplicate live rows should be collapsed within one folder"
++        );
++
++        let trash_live_42: i64 = conn
              .query_row(
 -                "SELECT COUNT(*) FROM messages WHERE account_id='acct' AND remote_id='UID:42' AND is_deleted=0",
 +                "SELECT COUNT(*)
@@ -297,30 +338,12 @@ index ed08363..46c550f 100644
 +                 WHERE m.account_id='acct'
 +                   AND m.remote_id='UID:42'
 +                   AND m.is_deleted=0
-+                   AND mf.folder_id='inbox'",
++                   AND mf.folder_id='trash'",
                  [],
                  |row| row.get(0),
              )
              .unwrap();
 -        assert_eq!(live_42, 1, "duplicate live rows should be collapsed to one");
-+        assert_eq!(
-+            inbox_live_42, 1,
-+            "duplicate live rows should be collapsed within one folder"
-+        );
-+
-+        let trash_live_42: i64 = conn
-+            .query_row(
-+                "SELECT COUNT(*)
-+                 FROM messages m
-+                 JOIN message_folders mf ON mf.message_id = m.id
-+                 WHERE m.account_id='acct'
-+                   AND m.remote_id='UID:42'
-+                   AND m.is_deleted=0
-+                   AND mf.folder_id='trash'",
-+                [],
-+                |row| row.get(0),
-+            )
-+            .unwrap();
 +        assert_eq!(
 +            trash_live_42, 1,
 +            "same remote_id must be allowed in a different folder"
@@ -352,7 +375,7 @@ index ed08363..46c550f 100644
          );
  
          let dup_tomb = conn.execute(
-@@ -684,6 +807,76 @@ mod tests {
+@@ -684,6 +807,79 @@ mod tests {
          );
      }
  
@@ -396,7 +419,10 @@ index ed08363..46c550f 100644
 +                |row| row.get(0),
 +            )
 +            .unwrap();
-+        assert_eq!(old_index_count, 0, "old account-scoped index must be dropped");
++        assert_eq!(
++            old_index_count, 0,
++            "old account-scoped index must be dropped"
++        );
 +
 +        conn.execute(
 +            "INSERT INTO messages (id, account_id, remote_id, is_deleted)
@@ -429,6 +455,75 @@ index ed08363..46c550f 100644
      #[test]
      fn migration_v11_backfills_existing_account_colors() {
          let conn = Connection::open_in_memory().unwrap();
+diff --git a/src-tauri/src/commands/messages/lifecycle.rs b/src-tauri/src/commands/messages/lifecycle.rs
+index 0130940..b3e88e1 100644
+--- a/src-tauri/src/commands/messages/lifecycle.rs
++++ b/src-tauri/src/commands/messages/lifecycle.rs
+@@ -61,6 +61,13 @@ fn queue_permanent_delete_failure(
+     Ok(())
+ }
+ 
++fn is_folder_scoped_remote_duplicate_error(error: &PebbleError) -> bool {
++    matches!(
++        error,
++        PebbleError::Storage(message) if message.contains("duplicate live remote_id in folder")
++    )
++}
++
+ /// Returns "archived" or "unarchived" so the frontend can show the correct toast.
+ #[tauri::command]
+ pub async fn archive_message(
+@@ -497,6 +504,7 @@ pub async fn delete_message(
+     let source_folder = find_message_folder(&state, &message_id, &msg.account_id)?;
+     let trash_folder = find_folder_by_role(&state, &msg.account_id, FolderRole::Trash).ok();
+     let is_permanent = source_folder.role == Some(FolderRole::Trash);
++    let is_imap_provider = provider_type == ProviderType::Imap;
+ 
+     let outcome = match provider_type {
+         ProviderType::Gmail => match connect_gmail(&state, &msg.account_id).await {
+@@ -743,9 +751,24 @@ pub async fn delete_message(
+         remove_search_documents(&state, std::slice::from_ref(&message_id))?;
+     } else if let Some(trash_folder) = trash_folder {
+         if trash_folder.id != source_folder.id {
+-            state
++            match state
+                 .store
+-                .move_message_to_folder(&message_id, &trash_folder.id)?;
++                .move_message_to_folder(&message_id, &trash_folder.id)
++            {
++                Ok(()) => {}
++                Err(e)
++                    if is_imap_provider
++                        && outcome == RemoteMutationOutcome::Applied
++                        && is_folder_scoped_remote_duplicate_error(&e) =>
++                {
++                    warn!(
++                        "IMAP delete for message {} moved remotely, but local Trash already has UID {}; soft-deleting local source copy",
++                        message_id, msg.remote_id
++                    );
++                    state.store.soft_delete_message(&message_id)?;
++                }
++                Err(e) => return Err(e),
++            }
+             refresh_search_document(&state, &message_id)?;
+         } else {
+             state.store.soft_delete_message(&message_id)?;
+@@ -1284,4 +1307,15 @@ mod remote_mutation_tests {
+             RemoteMutationOutcome::Failed
+         ));
+     }
++
++    #[test]
++    fn folder_scoped_remote_duplicate_storage_errors_are_detected() {
++        let duplicate = PebbleError::Storage("duplicate live remote_id in folder".to_string());
++        let other_storage = PebbleError::Storage("other storage error".to_string());
++        let network = PebbleError::Network("duplicate live remote_id in folder".to_string());
++
++        assert!(is_folder_scoped_remote_duplicate_error(&duplicate));
++        assert!(!is_folder_scoped_remote_duplicate_error(&other_storage));
++        assert!(!is_folder_scoped_remote_duplicate_error(&network));
++    }
+ }
 diff --git a/src/app/useCloseToBackground.ts b/src/app/useCloseToBackground.ts
 index 55486ab..b96bb6d 100644
 --- a/src/app/useCloseToBackground.ts
@@ -590,6 +685,3 @@ index 0f0bf90..5f35bec 100644
 +    expect(stopSync).not.toHaveBeenCalled();
    });
  });
--- 
-2.54.0.windows.1
-

@@ -1,20 +1,3 @@
-From e9033a05918f774a9e5602485ea95dff1d502b37 Mon Sep 17 00:00:00 2001
-From: xkcore123 <xkcore123@users.noreply.github.com>
-Date: Mon, 29 Jun 2026 19:25:21 +0800
-Subject: [PATCH] chore: keep actions windows-only
-
----
- .github/workflows/ci.yml                   |  54 +---
- .github/workflows/release.yml              | 318 ---------------------
- crates/pebble-store/src/migrations.rs      |   6 +-
- package.json                               |   2 -
- scripts/build-tauri.mjs                    |   4 +-
- tests/tauri/macos-release-config.test.ts   | 146 ----------
- tests/tauri/windows-release-config.test.ts |  74 +++++
- 7 files changed, 84 insertions(+), 520 deletions(-)
- delete mode 100644 tests/tauri/macos-release-config.test.ts
- create mode 100644 tests/tauri/windows-release-config.test.ts
-
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 index 05fca6f..c32fac0 100644
 --- a/.github/workflows/ci.yml
@@ -92,12 +75,55 @@ index 05fca6f..c32fac0 100644
 +      - name: Build Windows installer
 +        run: pnpm build:windows
 diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
-index 3b4e005..356c675 100644
+index 3b4e005..19a9ba6 100644
 --- a/.github/workflows/release.yml
 +++ b/.github/workflows/release.yml
-@@ -180,321 +180,3 @@ jobs:
+@@ -54,8 +54,8 @@ jobs:
+         run: |
+           $ErrorActionPreference = "Stop"
+           $tag = "${{ inputs.tag || github.ref_name }}"
+-          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+-            throw "Release tags must use vMAJOR.MINOR.PATCH, got '$tag'."
++          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)(?<suffix>-patched\.\d{14})?$') {
++            throw "Release tags must use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-patched.YYYYMMDDHHMMSS, got '$tag'."
+           }
+           $version = $Matches.version
+ 
+@@ -74,10 +74,10 @@ jobs:
+           }
+           foreach ($entry in $versions.GetEnumerator()) {
+             if ($entry.Value -ne $version) {
+-              throw "$($entry.Key) version '$($entry.Value)' does not match tag '$tag'."
++              throw "$($entry.Key) version '$($entry.Value)' does not match tag app version '$version'."
+             }
+           }
+-          "PEBBLE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
++          "PEBBLE_VERSION=$($tag.Substring(1))" | Out-File -FilePath $env:GITHUB_ENV -Append
+ 
+       - name: Validate OAuth build config
+         env:
+@@ -161,7 +161,10 @@ jobs:
+           }
+ 
+           $tag = "${{ inputs.tag || github.ref_name }}"
+-          $version = $tag.Substring(1)
++          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)') {
++            throw "Could not read app version from release tag '$tag'."
++          }
++          $version = $Matches.version
+           $title = "Pebble $tag"
+           $changelog = Get-Content CHANGELOG.md -Raw
+           $escapedVersion = [regex]::Escape($version)
+@@ -178,323 +181,9 @@ jobs:
+             Invoke-Gh release edit $tag --title $title --notes-file $notesFile
+             Invoke-Gh release upload $tag release-artifacts/* --clobber
            } else {
-             Invoke-Gh release create $tag release-artifacts/* --title $title --notes-file $notesFile
+-            Invoke-Gh release create $tag release-artifacts/* --title $title --notes-file $notesFile
++            $releaseFlags = @()
++            if ($tag -match '-patched\.') {
++              $releaseFlags += "--prerelease"
++            }
++            Invoke-Gh release create $tag release-artifacts/* --title $title --notes-file $notesFile @releaseFlags
            }
 -
 -  linux:
@@ -417,23 +443,6 @@ index 3b4e005..356c675 100644
 -          set -euo pipefail
 -          tag="${{ inputs.tag || github.ref_name }}"
 -          gh release upload "$tag" release-artifacts/* --clobber
-diff --git a/crates/pebble-store/src/migrations.rs b/crates/pebble-store/src/migrations.rs
-index 46c550f..e892a12 100644
---- a/crates/pebble-store/src/migrations.rs
-+++ b/crates/pebble-store/src/migrations.rs
-@@ -847,7 +847,11 @@ mod tests {
-                 |row| row.get(0),
-             )
-             .unwrap();
--        assert_eq!(old_index_count, 0, "old account-scoped index must be dropped");
-+        assert_eq!(
-+            old_index_count,
-+            0,
-+            "old account-scoped index must be dropped"
-+        );
- 
-         conn.execute(
-             "INSERT INTO messages (id, account_id, remote_id, is_deleted)
 diff --git a/package.json b/package.json
 index f83f673..c70ef08 100644
 --- a/package.json
@@ -622,10 +631,10 @@ index 145802c..0000000
 -});
 diff --git a/tests/tauri/windows-release-config.test.ts b/tests/tauri/windows-release-config.test.ts
 new file mode 100644
-index 0000000..5a91a8c
+index 0000000..5e13a5b
 --- /dev/null
 +++ b/tests/tauri/windows-release-config.test.ts
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,90 @@
 +import { readFileSync } from "node:fs";
 +import { resolve } from "node:path";
 +import { pathToFileURL } from "node:url";
@@ -694,12 +703,25 @@ index 0000000..5a91a8c
 +    expect(releaseWorkflow).toContain("pnpm build:windows");
 +    expect(releaseWorkflow).toContain("target/release/bundle/nsis");
 +    expect(releaseWorkflow).toContain("pebble-windows-${{ env.PEBBLE_VERSION }}");
++    expect(releaseWorkflow).toContain("vMAJOR.MINOR.PATCH-patched.YYYYMMDDHHMMSS");
++    expect(releaseWorkflow).toContain("--prerelease");
 +    expect(releaseWorkflow).not.toContain("Linux Package Release");
 +    expect(releaseWorkflow).not.toContain("macOS Release");
 +    expect(releaseWorkflow).not.toContain("*.AppImage");
 +    expect(releaseWorkflow).not.toContain("*.dmg");
 +  });
++
++  it("syncs upstream weekly and dispatches Windows releases only after updates", () => {
++    const autoPatchWorkflow = readFileSync(
++      resolve(process.cwd(), ".github", "workflows", "auto-patch.yml"),
++      "utf8",
++    );
++
++    expect(autoPatchWorkflow).toContain('cron: "17 20 * * 0"');
++    expect(autoPatchWorkflow).toContain("actions: write");
++    expect(autoPatchWorkflow).toContain("id: sync");
++    expect(autoPatchWorkflow).toContain("steps.sync.outputs.upstream_changed == 'true'");
++    expect(autoPatchWorkflow).toContain("gh workflow run release.yml");
++    expect(autoPatchWorkflow).toContain("patched.");
++  });
 +});
--- 
-2.54.0.windows.1
-

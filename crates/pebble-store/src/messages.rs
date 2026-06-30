@@ -1441,6 +1441,41 @@ mod remote_id_scope_tests {
     }
 
     #[test]
+    fn move_message_to_folder_rejects_duplicate_remote_id_in_target_folder() {
+        let store = Store::open_in_memory().unwrap();
+        let account = make_account();
+        store.insert_account(&account).unwrap();
+
+        let inbox = make_folder(&account.id, "INBOX", FolderRole::Inbox, 0);
+        let trash = make_folder(&account.id, "Trash", FolderRole::Trash, 1);
+        store.insert_folder(&inbox).unwrap();
+        store.insert_folder(&trash).unwrap();
+
+        let inbox_msg = make_message(&account.id, "496");
+        store
+            .insert_message(&inbox_msg, std::slice::from_ref(&inbox.id))
+            .unwrap();
+
+        let trash_msg = make_message(&account.id, "496");
+        store
+            .insert_message(&trash_msg, std::slice::from_ref(&trash.id))
+            .unwrap();
+
+        let duplicate_target = store.move_message_to_folder(&inbox_msg.id, &trash.id);
+        assert!(
+            duplicate_target.is_err(),
+            "same IMAP UID cannot become live twice in one target folder"
+        );
+
+        let folder_ids = store.get_message_folder_ids(&inbox_msg.id).unwrap();
+        assert_eq!(
+            folder_ids,
+            vec![inbox.id],
+            "failed moves should leave the original folder association intact"
+        );
+    }
+
+    #[test]
     fn update_remote_id_reports_missing_message() {
         let store = Store::open_in_memory().unwrap();
 
