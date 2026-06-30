@@ -75,7 +75,7 @@ index 05fca6f..c32fac0 100644
 +      - name: Build Windows installer
 +        run: pnpm build:windows
 diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
-index 3b4e005..19a9ba6 100644
+index 3b4e005..58f96f5 100644
 --- a/.github/workflows/release.yml
 +++ b/.github/workflows/release.yml
 @@ -54,8 +54,8 @@ jobs:
@@ -89,7 +89,7 @@ index 3b4e005..19a9ba6 100644
            }
            $version = $Matches.version
  
-@@ -74,10 +74,10 @@ jobs:
+@@ -74,12 +74,12 @@ jobs:
            }
            foreach ($entry in $versions.GetEnumerator()) {
              if ($entry.Value -ne $version) {
@@ -100,9 +100,34 @@ index 3b4e005..19a9ba6 100644
 -          "PEBBLE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
 +          "PEBBLE_VERSION=$($tag.Substring(1))" | Out-File -FilePath $env:GITHUB_ENV -Append
  
-       - name: Validate OAuth build config
+-      - name: Validate OAuth build config
++      - name: Report OAuth build config
          env:
-@@ -161,7 +161,10 @@ jobs:
+           GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+@@ -87,13 +87,18 @@ jobs:
+           MICROSOFT_CLIENT_SECRET: ${{ secrets.MICROSOFT_CLIENT_SECRET }}
+         run: |
+           $ErrorActionPreference = "Stop"
+-          foreach ($name in @("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "MICROSOFT_CLIENT_ID")) {
++          $missing = @()
++          foreach ($name in @("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET")) {
+             $value = [Environment]::GetEnvironmentVariable($name)
+             if ([string]::IsNullOrWhiteSpace($value)) {
+-              throw "$name is not configured in the 'action' GitHub environment."
++              $missing += $name
+             }
+           }
+-          "OAuth client IDs and Google client secret are configured for this release build."
++          if ($missing.Count -gt 0) {
++            Write-Warning "OAuth build variables not configured in the 'action' GitHub environment: $($missing -join ', '). OAuth sign-in can still be configured at runtime with .env."
++          } else {
++            "OAuth build variables are configured for this release build."
++          }
+ 
+       - name: Install dependencies
+         run: pnpm install --frozen-lockfile
+@@ -161,7 +166,10 @@ jobs:
            }
  
            $tag = "${{ inputs.tag || github.ref_name }}"
@@ -114,7 +139,7 @@ index 3b4e005..19a9ba6 100644
            $title = "Pebble $tag"
            $changelog = Get-Content CHANGELOG.md -Raw
            $escapedVersion = [regex]::Escape($version)
-@@ -178,323 +181,9 @@ jobs:
+@@ -178,323 +186,9 @@ jobs:
              Invoke-Gh release edit $tag --title $title --notes-file $notesFile
              Invoke-Gh release upload $tag release-artifacts/* --clobber
            } else {
@@ -631,10 +656,10 @@ index 145802c..0000000
 -});
 diff --git a/tests/tauri/windows-release-config.test.ts b/tests/tauri/windows-release-config.test.ts
 new file mode 100644
-index 0000000..5e13a5b
+index 0000000..f024409
 --- /dev/null
 +++ b/tests/tauri/windows-release-config.test.ts
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,93 @@
 +import { readFileSync } from "node:fs";
 +import { resolve } from "node:path";
 +import { pathToFileURL } from "node:url";
@@ -705,6 +730,9 @@ index 0000000..5e13a5b
 +    expect(releaseWorkflow).toContain("pebble-windows-${{ env.PEBBLE_VERSION }}");
 +    expect(releaseWorkflow).toContain("vMAJOR.MINOR.PATCH-patched.YYYYMMDDHHMMSS");
 +    expect(releaseWorkflow).toContain("--prerelease");
++    expect(releaseWorkflow).toContain("Report OAuth build config");
++    expect(releaseWorkflow).toContain("Write-Warning");
++    expect(releaseWorkflow).not.toContain("throw \"$name is not configured");
 +    expect(releaseWorkflow).not.toContain("Linux Package Release");
 +    expect(releaseWorkflow).not.toContain("macOS Release");
 +    expect(releaseWorkflow).not.toContain("*.AppImage");
