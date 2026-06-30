@@ -186,6 +186,8 @@
     "testNotificationSent": "Test notification sent",
     "testNotificationFailed": "Failed to send test notification",
     "startupBehavior": "Startup Behavior",
+    "launchAtStartup": "Launch Pebble at system startup",
+    "autostartFailed": "Failed to update launch at startup",
     "startHiddenToTray": "Start hidden to tray",
     "closeBehavior": "Close Behavior",
     "quitOnClose": "Quit app when window is closed",

@@ -1002,8 +1002,18 @@ fn linkify_html_text_nodes(html: &str) -> String {
             })],
             document_content_handlers: vec![lol_html::doc_text!(move |text| {
                 if *anchor_depth_for_text.borrow() == 0 {
-                    if let Some(linked) = linkify_text_to_html(text.as_str()) {
-                        text.replace(&linked, ContentType::Html);
+                    // lol_html exposes text nodes in their raw, entity-encoded
+                    // source form (e.g. `&amp;`). Decode to the logical text
+                    // before scanning so the linkifier escapes exactly once
+                    // instead of double-escaping existing entities, which would
+                    // turn `&amp;` into `&amp;amp;` and surface a literal
+                    // `&amp;` inside URLs (issue #68). On decode failure we
+                    // leave the original chunk untouched rather than risk
+                    // re-escaping it.
+                    if let Ok(decoded) = htmlescape::decode_html(text.as_str()) {
+                        if let Some(linked) = linkify_text_to_html(&decoded) {
+                            text.replace(&linked, ContentType::Html);
+                        }
                     }
                 }
                 Ok(())
@@ -1553,6 +1563,86 @@ mod tests {
         assert!(result
             .html
             .contains(r#"<a href="mailto:team@example.org" target="_blank" rel="noopener noreferrer">team@example.org</a>"#));
+    }
+
+    #[test]
+    fn linkify_does_not_double_escape_ampersands_in_plain_text_urls() {
+        // Regression for issue #68: a query-string URL shown as visible text
+        // (not an existing anchor) must not have its `&` double-escaped into a
+        // literal `&amp;` in the rendered link.
+        let guard = PrivacyGuard::new();
+
+        // HTML email path: the URL appears as text; the source encodes `&` as
+        // `&amp;` per HTML rules.
+        let html = guard.render_message_html(
+            r#"<p>Copy this link: https://example.com/wp-login.php?login=a&amp;key=b&amp;action=rp</p>"#,
+            "",
+            &PrivacyMode::Strict,
+        );
+        assert!(
+            !html.html.contains("&amp;amp;"),
+            "double-escaped ampersand in HTML path: {}",
+            html.html
+        );
+        assert!(
+            html.html.contains(
+                r#"<a href="https://example.com/wp-login.php?login=a&amp;key=b&amp;action=rp" target="_blank" rel="noopener noreferrer">https://example.com/wp-login.php?login=a&amp;key=b&amp;action=rp</a>"#
+            ),
+            "unexpected anchor markup in HTML path: {}",
+            html.html
+        );
+
+        // Plain-text email path: body text has literal `&` which is escaped
+        // once when wrapped in <pre>, and must not be escaped again.
+        let text = guard.render_message_html(
+            "",
+            "Copy this link: https://example.com/wp-login.php?login=a&key=b&action=rp",
+            &PrivacyMode::Strict,
+        );
+        assert!(
+            !text.html.contains("&amp;amp;"),
+            "double-escaped ampersand in plain-text path: {}",
+            text.html
+        );
+        assert!(
+            text.html.contains(
+                r#"<a href="https://example.com/wp-login.php?login=a&amp;key=b&amp;action=rp" target="_blank" rel="noopener noreferrer">https://example.com/wp-login.php?login=a&amp;key=b&amp;action=rp</a>"#
+            ),
+            "unexpected anchor markup in plain-text path: {}",
+            text.html
+        );
+    }
+
+    #[test]
+    fn linkify_still_works_around_common_entities() {
+        // Ensure decoding does not regress linkification when the chunk also
+        // contains common email entities (nbsp, copy, numeric).
+        let guard = PrivacyGuard::new();
+        let result = guard.render_message_html(
+            "<p>Visit https://example.com/a?x=1&amp;y=2&nbsp;now &copy; 2026 &#169;</p>",
+            "",
+            &PrivacyMode::Strict,
+        );
+        assert!(
+            !result.html.contains("&amp;amp;"),
+            "double-escaped ampersand: {}",
+            result.html
+        );
+        assert!(
+            result
+                .html
+                .contains(r#"<a href="https://example.com/a?x=1&amp;y=2""#),
+            "URL was not linkified alongside entities: {}",
+            result.html
+        );
+        // The copyright entity must survive (not be dropped or double-escaped).
+        assert!(
+            result.html.contains('\u{00A9}')
+                || result.html.contains("&copy;")
+                || result.html.contains("&#169;"),
+            "copyright entity lost: {}",
+            result.html
+        );
     }
 
     #[test]

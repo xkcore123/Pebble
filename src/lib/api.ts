@@ -165,6 +165,7 @@ export async function testImapConnection(
   proxyPort?: number,
   username?: string,
   password?: string,
+  email?: string,
 ): Promise<string> {
   return invoke<string>("test_imap_connection", {
     request: {
@@ -176,6 +177,7 @@ export async function testImapConnection(
       proxy_port: proxyPort,
       username,
       password,
+      email,
     },
   });
 }
@@ -708,4 +710,16 @@ export async function deleteDraft(accountId: string, draftId: string): Promise<v
 
 export async function getFolderUnreadCounts(accountId: string): Promise<Record<string, number>> {
   return invoke("get_folder_unread_counts", { accountId });
+}
+
+// ─── Autostart API ───────────────────────────────────────────────────────────
+
+/** Whether Pebble is registered to launch when the user logs in. */
+export async function getAutostartEnabled(): Promise<boolean> {
+  return invoke<boolean>("get_autostart_enabled");
+}
+
+/** Enable or disable launching Pebble when the user logs in. */
+export async function setAutostartEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("set_autostart_enabled", { enabled });
 }

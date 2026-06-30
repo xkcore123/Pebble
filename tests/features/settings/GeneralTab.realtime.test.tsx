@@ -6,6 +6,9 @@ import { useUIStore } from "../../../src/stores/ui.store";
 
 vi.mock("../../../src/lib/api", () => ({
   showTestNotification: vi.fn().mockResolvedValue(undefined),
+  openDefaultMailSettings: vi.fn().mockResolvedValue(undefined),
+  getAutostartEnabled: vi.fn().mockResolvedValue(false),
+  setAutostartEnabled: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("react-i18next", () => ({

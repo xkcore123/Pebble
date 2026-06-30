@@ -659,6 +659,22 @@ pub struct TestConnectionRequest {
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+/// Resolve the effective IMAP test login name and whether the connection test
+/// should attempt an authenticated LOGIN.
+///
+/// The login name falls back to the account email when the username field is
+/// blank — the same rule `add_account` applies when persisting credentials. A
+/// blank username therefore still produces a real LOGIN test (issue #60),
+/// instead of silently downgrading to a connectivity-only check and reporting a
+/// misleading "passed" while the actual credentials are never verified.
+fn resolve_imap_test_login(username: &str, email: &str, password: &str) -> (String, bool) {
+    let resolved = resolve_username(username, email);
+    let should_login = !resolved.is_empty() && !password.is_empty();
+    (resolved, should_login)
 }
 
 #[derive(Debug, Deserialize)]
@@ -695,13 +711,17 @@ pub async fn test_imap_connection(
         get_global_proxy_raw(&state.crypto, &state.store)?,
     )
     .map(mail_proxy_from_http);
-    let has_credentials = request.username.as_ref().is_some_and(|u| !u.is_empty())
-        && request.password.as_ref().is_some_and(|p| !p.is_empty());
+    let password = request.password.unwrap_or_default();
+    let (username, has_credentials) = resolve_imap_test_login(
+        request.username.as_deref().unwrap_or_default(),
+        request.email.as_deref().unwrap_or_default(),
+        &password,
+    );
     let config = pebble_mail::ImapConfig {
         host: request.imap_host,
         port: request.imap_port,
-        username: request.username.unwrap_or_default(),
-        password: request.password.unwrap_or_default(),
+        username,
+        password,
         security: request.imap_security,
         accept_invalid_certs: request.accept_invalid_certs,
         proxy,
@@ -900,6 +920,41 @@ mod tests {
             resolve_username("legacy-login", "user@example.com"),
             "legacy-login"
         );
+    }
+
+    #[test]
+    fn imap_test_login_uses_email_when_username_blank() {
+        // Issue #60: Outlook/hotmail users leave the username blank; the test
+        // must still authenticate using the email as the login name rather than
+        // downgrade to a connectivity-only check.
+        let (username, should_login) =
+            resolve_imap_test_login("", "user@hotmail.com", "app-password");
+        assert_eq!(username, "user@hotmail.com");
+        assert!(should_login);
+    }
+
+    #[test]
+    fn imap_test_login_keeps_explicit_username() {
+        let (username, should_login) =
+            resolve_imap_test_login("custom-login", "user@example.com", "pw");
+        assert_eq!(username, "custom-login");
+        assert!(should_login);
+    }
+
+    #[test]
+    fn imap_test_login_skips_login_without_password() {
+        let (username, should_login) = resolve_imap_test_login("", "user@example.com", "");
+        assert_eq!(username, "user@example.com");
+        assert!(!should_login);
+    }
+
+    #[test]
+    fn imap_test_login_skips_login_without_username_or_email() {
+        // No email yet (e.g. connectivity probe before filling the form): there
+        // is no login name to try, so fall back to a connectivity-only check.
+        let (username, should_login) = resolve_imap_test_login("", "", "app-password");
+        assert!(username.is_empty());
+        assert!(!should_login);
     }
 
     #[test]
