@@ -28,6 +28,11 @@ struct AccountCredentials {
     proxy_mode: AccountProxyMode,
     imap: ImapConfig,
     smtp: SmtpConfig,
+    /// Per-account opt-in to permit unencrypted (plaintext) connections to a
+    /// non-localhost server (issue #70). Off by default; enabling it lets the
+    /// user connect to legacy servers that only offer plaintext, accepting that
+    /// credentials are sent in cleartext.
+    allow_plaintext: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +41,8 @@ struct StoredAccountCredentials {
     proxy_mode: AccountProxyMode,
     imap: StoredMailConfig,
     smtp: StoredMailConfig,
+    #[serde(default, skip_serializing_if = "is_false")]
+    allow_plaintext: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +137,7 @@ impl From<&AccountCredentials> for StoredAccountCredentials {
             proxy_mode: value.proxy_mode,
             imap: StoredMailConfig::from(&value.imap),
             smtp: StoredMailConfig::from(&value.smtp),
+            allow_plaintext: value.allow_plaintext,
         }
     }
 }
@@ -140,6 +148,7 @@ impl From<StoredAccountCredentials> for AccountCredentials {
             proxy_mode: value.proxy_mode,
             imap: value.imap.into_imap(),
             smtp: value.smtp.into_smtp(),
+            allow_plaintext: value.allow_plaintext,
         }
     }
 }
@@ -232,10 +241,16 @@ fn validate_connection_security(
     label: &str,
     host: &str,
     security: &ConnectionSecurity,
+    allow_plaintext: bool,
 ) -> std::result::Result<(), PebbleError> {
-    if matches!(security, ConnectionSecurity::Plain) && !is_loopback_mail_host(host) {
+    if matches!(security, ConnectionSecurity::Plain)
+        && !is_loopback_mail_host(host)
+        && !allow_plaintext
+    {
         return Err(PebbleError::Validation(format!(
-            "{label} plaintext connections are only allowed for localhost"
+            "{label} plaintext connections are disabled by default. Enable \"Allow \
+             unencrypted connection\" for this account to connect to a server that only \
+             supports plaintext (your password will be sent unencrypted)."
         )));
     }
     Ok(())
@@ -274,6 +289,8 @@ pub struct AddAccountRequest {
     pub smtp_security: ConnectionSecurity,
     #[serde(default)]
     pub accept_invalid_certs: bool,
+    #[serde(default)]
+    pub allow_plaintext: bool,
     #[serde(default)]
     pub proxy_host: Option<String>,
     #[serde(default)]
@@ -319,8 +336,18 @@ pub async fn add_account(
     } else {
         "IMAP"
     };
-    validate_connection_security(incoming_label, &request.imap_host, &request.imap_security)?;
-    validate_connection_security("SMTP", &request.smtp_host, &request.smtp_security)?;
+    validate_connection_security(
+        incoming_label,
+        &request.imap_host,
+        &request.imap_security,
+        request.allow_plaintext,
+    )?;
+    validate_connection_security(
+        "SMTP",
+        &request.smtp_host,
+        &request.smtp_security,
+        request.allow_plaintext,
+    )?;
 
     let existing_accounts = state.store.list_accounts()?;
     let account = Account {
@@ -370,6 +397,7 @@ pub async fn add_account(
                 accept_invalid_certs: request.accept_invalid_certs,
                 proxy,
             },
+            allow_plaintext: request.allow_plaintext,
         };
 
         // Encrypt credentials and store as auth_data
@@ -469,6 +497,7 @@ pub async fn update_account(
                 accept_invalid_certs: false,
                 proxy: None,
             },
+            allow_plaintext: false,
         },
     };
 
@@ -530,13 +559,27 @@ pub async fn update_account(
     }
     creds.smtp.username = resolve_username(&creds.smtp.username, &email);
 
+    // `allow_plaintext` is set only at account creation; it is preserved here by
+    // the deserialize→serialize round-trip of the stored credentials, so an
+    // existing plaintext account still validates on edit.
+
     let incoming_label = if provider == ProviderType::Pop3 {
         "POP3"
     } else {
         "IMAP"
     };
-    validate_connection_security(incoming_label, &creds.imap.host, &creds.imap.security)?;
-    validate_connection_security("SMTP", &creds.smtp.host, &creds.smtp.security)?;
+    validate_connection_security(
+        incoming_label,
+        &creds.imap.host,
+        &creds.imap.security,
+        creds.allow_plaintext,
+    )?;
+    validate_connection_security(
+        "SMTP",
+        &creds.smtp.host,
+        &creds.smtp.security,
+        creds.allow_plaintext,
+    )?;
 
     state
         .store
@@ -661,6 +704,8 @@ pub struct TestConnectionRequest {
     pub password: Option<String>,
     #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
+    pub allow_plaintext: bool,
 }
 
 /// Resolve the effective IMAP test login name and whether the connection test
@@ -692,6 +737,8 @@ pub struct TestPop3ConnectionRequest {
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    #[serde(default)]
+    pub allow_plaintext: bool,
 }
 
 #[tauri::command]
@@ -699,7 +746,12 @@ pub async fn test_imap_connection(
     state: State<'_, AppState>,
     request: TestConnectionRequest,
 ) -> std::result::Result<String, PebbleError> {
-    validate_connection_security("IMAP", &request.imap_host, &request.imap_security)?;
+    validate_connection_security(
+        "IMAP",
+        &request.imap_host,
+        &request.imap_security,
+        request.allow_plaintext,
+    )?;
 
     let requested_proxy = proxy_config_from_parts(
         request.proxy_host,
@@ -738,7 +790,12 @@ pub async fn test_pop3_connection(
     state: State<'_, AppState>,
     request: TestPop3ConnectionRequest,
 ) -> std::result::Result<String, PebbleError> {
-    validate_connection_security("POP3", &request.pop3_host, &request.pop3_security)?;
+    validate_connection_security(
+        "POP3",
+        &request.pop3_host,
+        &request.pop3_security,
+        request.allow_plaintext,
+    )?;
 
     let requested_proxy = proxy_config_from_parts(
         request.proxy_host,
@@ -959,19 +1016,44 @@ mod tests {
 
     #[test]
     fn rejects_plaintext_security_for_remote_hosts() {
-        let err =
-            validate_connection_security("IMAP", "mail.example.com", &ConnectionSecurity::Plain)
-                .expect_err("remote plaintext mail connections must be rejected");
+        let err = validate_connection_security(
+            "IMAP",
+            "mail.example.com",
+            &ConnectionSecurity::Plain,
+            false,
+        )
+        .expect_err("remote plaintext mail connections must be rejected");
 
         assert!(matches!(err, PebbleError::Validation(_)));
     }
 
     #[test]
     fn allows_plaintext_security_for_localhost() {
-        validate_connection_security("IMAP", "localhost", &ConnectionSecurity::Plain)
+        validate_connection_security("IMAP", "localhost", &ConnectionSecurity::Plain, false)
             .expect("localhost plaintext is useful for local test servers");
-        validate_connection_security("SMTP", "127.0.0.1", &ConnectionSecurity::Plain)
+        validate_connection_security("SMTP", "127.0.0.1", &ConnectionSecurity::Plain, false)
             .expect("loopback plaintext is useful for local test servers");
+    }
+
+    #[test]
+    fn allows_plaintext_for_remote_host_when_opted_in() {
+        // Issue #70: some providers (e.g. Perfect World mail) only offer
+        // unencrypted connections. With the per-account opt-in enabled, a remote
+        // plaintext connection must be permitted instead of hard-rejected.
+        validate_connection_security("IMAP", "mail.88.com", &ConnectionSecurity::Plain, true)
+            .expect("remote plaintext must be allowed when the account opts in");
+        validate_connection_security("SMTP", "mail.88.com", &ConnectionSecurity::Plain, true)
+            .expect("remote plaintext must be allowed when the account opts in");
+    }
+
+    #[test]
+    fn opt_in_does_not_affect_encrypted_security() {
+        // The opt-in only relaxes plaintext; TLS/STARTTLS are always fine and
+        // are unaffected by the flag either way.
+        validate_connection_security("IMAP", "mail.88.com", &ConnectionSecurity::Tls, false)
+            .expect("TLS is always allowed");
+        validate_connection_security("IMAP", "mail.88.com", &ConnectionSecurity::StartTls, false)
+            .expect("STARTTLS is always allowed");
     }
 
     #[test]
@@ -996,6 +1078,7 @@ mod tests {
                 accept_invalid_certs: true,
                 proxy: None,
             },
+            allow_plaintext: true,
         };
 
         let bytes = serialize_account_credentials(&credentials).unwrap();
@@ -1005,6 +1088,7 @@ mod tests {
         assert_eq!(decoded.smtp.password, "smtp-secret");
         assert!(decoded.imap.accept_invalid_certs);
         assert!(decoded.smtp.accept_invalid_certs);
+        assert!(decoded.allow_plaintext);
     }
 
     #[test]
@@ -1032,6 +1116,7 @@ mod tests {
                 accept_invalid_certs: false,
                 proxy: None,
             },
+            allow_plaintext: false,
         };
 
         let proxy = account_proxy_from_credentials(&credentials).unwrap();
@@ -1062,6 +1147,7 @@ mod tests {
                 accept_invalid_certs: false,
                 proxy: None,
             },
+            allow_plaintext: false,
         };
 
         set_account_proxy_on_credentials(

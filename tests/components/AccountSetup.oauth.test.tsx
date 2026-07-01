@@ -189,6 +189,7 @@ describe("AccountSetup OAuth", () => {
         undefined,
         "legacy-user",
         "app-password",
+        false,
       );
     });
 
@@ -252,6 +253,69 @@ describe("AccountSetup OAuth", () => {
           username: "",
           password: "app-password",
         }),
+      );
+    });
+  });
+
+  it("clears the plaintext opt-in when security switches back to encrypted", async () => {
+    // Issue #70 review: the opt-in checkbox only shows while a connection is
+    // unencrypted. Checking it and then switching both sides back to an
+    // encrypted mode must NOT persist allow_plaintext=true on the account.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AccountSetup onClose={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.change(screen.getByLabelText("Email address"), {
+      target: { value: "legacy@88.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Display name"), {
+      target: { value: "Legacy" },
+    });
+    fireEvent.change(screen.getByLabelText("IMAP host"), {
+      target: { value: "mail.88.com" },
+    });
+    fireEvent.change(screen.getByLabelText("SMTP host"), {
+      target: { value: "mail.88.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Password / App password"), {
+      target: { value: "app-password" },
+    });
+
+    const imapSecurity = document.getElementById(
+      "setup-imap-security",
+    ) as HTMLSelectElement;
+    const smtpSecurity = document.getElementById(
+      "setup-smtp-security",
+    ) as HTMLSelectElement;
+
+    // Go plaintext on both sides, opt in.
+    fireEvent.change(imapSecurity, { target: { value: "plain" } });
+    fireEvent.change(smtpSecurity, { target: { value: "plain" } });
+    const optIn = screen.getByRole("checkbox", {
+      name: /Allow unencrypted connection/,
+    });
+    fireEvent.click(optIn);
+    expect((optIn as HTMLInputElement).checked).toBe(true);
+
+    // Change our mind: switch both back to encrypted. The checkbox disappears
+    // and the flag must reset.
+    fireEvent.change(imapSecurity, { target: { value: "tls" } });
+    fireEvent.change(smtpSecurity, { target: { value: "starttls" } });
+    expect(
+      screen.queryByRole("checkbox", { name: /Allow unencrypted connection/ }),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Account & Sync" }));
+
+    await waitFor(() => {
+      expect(addAccount).toHaveBeenCalledWith(
+        expect.objectContaining({ allow_plaintext: false }),
       );
     });
   });

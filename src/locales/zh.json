@@ -507,6 +507,7 @@
     "discardConfirm": "您的更改将会丢失，确定放弃吗？",
     "accountAdded": "账户添加成功",
     "acceptInvalidCerts": "允许无效的 TLS 证书",
+    "allowPlaintext": "允许不加密连接（不安全 —— 密码将以明文在网络上传输）",
     "tlsCertificateVerification": "TLS 证书验证",
     "verifyTlsCerts": "验证证书"
   },

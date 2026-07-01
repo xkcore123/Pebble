@@ -507,6 +507,7 @@
     "discardConfirm": "Your changes will be lost. Are you sure?",
     "accountAdded": "Account added successfully",
     "acceptInvalidCerts": "Allow invalid TLS certificates",
+    "allowPlaintext": "Allow unencrypted connection (insecure — your password is sent in cleartext)",
     "tlsCertificateVerification": "TLS certificate verification",
     "verifyTlsCerts": "Verify certificates"
   },

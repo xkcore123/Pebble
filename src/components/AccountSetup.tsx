@@ -93,6 +93,7 @@ export default function AccountSetup({ onClose }: Props) {
     smtp_port: 587,
     smtp_security: "starttls",
     accept_invalid_certs: false,
+    allow_plaintext: false,
     username: "",
     password: "",
   };
@@ -181,6 +182,7 @@ export default function AccountSetup({ onClose }: Props) {
               form.proxy_port,
               form.username || undefined,
               form.password || undefined,
+              form.allow_plaintext,
             )
           : await testImapConnection(
               form.imap_host,
@@ -192,6 +194,7 @@ export default function AccountSetup({ onClose }: Props) {
               form.username || undefined,
               form.password || undefined,
               form.email || undefined,
+              form.allow_plaintext,
             );
       setTestResult({ ok: true, message: report });
     } catch (err) {
@@ -239,6 +242,17 @@ export default function AccountSetup({ onClose }: Props) {
       // Keep username in sync with email when username hasn't been manually changed
       if (field === "email" && prev.username === prev.email) {
         updated.username = value as string;
+      }
+      // The plaintext opt-in checkbox only shows while a connection is
+      // unencrypted. If the user switches both sides back to an encrypted
+      // mode, clear the flag so a transiently-checked box can't persist
+      // allow_plaintext=true onto an encrypted account (issue #70).
+      if (field === "imap_security" || field === "smtp_security") {
+        const anyPlain =
+          updated.imap_security === "plain" || updated.smtp_security === "plain";
+        if (!anyPlain) {
+          updated.allow_plaintext = false;
+        }
       }
       return updated;
     });
@@ -632,6 +646,33 @@ export default function AccountSetup({ onClose }: Props) {
               />
               {t("accountSetup.acceptInvalidCerts", "Allow invalid TLS certificates")}
             </label>
+
+            {(form.imap_security === "plain" || form.smtp_security === "plain") && (
+              <label
+                htmlFor="setup-allow-plaintext"
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: "8px",
+                  fontSize: "12px",
+                  color: "var(--color-warning, #b45309)",
+                }}
+              >
+                <input
+                  id="setup-allow-plaintext"
+                  type="checkbox"
+                  checked={!!form.allow_plaintext}
+                  onChange={(e) => handleChange("allow_plaintext", e.target.checked)}
+                  style={{ marginTop: "2px" }}
+                />
+                <span>
+                  {t(
+                    "accountSetup.allowPlaintext",
+                    "Allow unencrypted connection (insecure — your password is sent in cleartext)",
+                  )}
+                </span>
+              </label>
+            )}
 
             {/* Username */}
             <div style={fieldStyle}>

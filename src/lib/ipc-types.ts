@@ -170,6 +170,7 @@ export interface AddAccountRequest {
   imap_security: ConnectionSecurity;
   smtp_security: ConnectionSecurity;
   accept_invalid_certs?: boolean;
+  allow_plaintext?: boolean;
   proxy_host?: string;
   proxy_port?: number;
 }

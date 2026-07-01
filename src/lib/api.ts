@@ -166,6 +166,7 @@ export async function testImapConnection(
   username?: string,
   password?: string,
   email?: string,
+  allowPlaintext?: boolean,
 ): Promise<string> {
   return invoke<string>("test_imap_connection", {
     request: {
@@ -178,6 +179,7 @@ export async function testImapConnection(
       username,
       password,
       email,
+      allow_plaintext: allowPlaintext,
     },
   });
 }
@@ -191,6 +193,7 @@ export async function testPop3Connection(
   proxyPort?: number,
   username?: string,
   password?: string,
+  allowPlaintext?: boolean,
 ): Promise<string> {
   return invoke<string>("test_pop3_connection", {
     request: {
@@ -202,6 +205,7 @@ export async function testPop3Connection(
       proxy_port: proxyPort,
       username,
       password,
+      allow_plaintext: allowPlaintext,
     },
   });
 }
