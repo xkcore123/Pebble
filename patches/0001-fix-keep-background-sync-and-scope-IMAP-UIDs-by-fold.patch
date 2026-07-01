@@ -1,3 +1,23 @@
+diff --git a/crates/pebble-mail/src/sync.rs b/crates/pebble-mail/src/sync.rs
+index bdd7a6a..c92ab4d 100644
+--- a/crates/pebble-mail/src/sync.rs
++++ b/crates/pebble-mail/src/sync.rs
+@@ -1488,6 +1488,7 @@ impl SyncWorker {
+                     }
+                     Ok(crate::idle::IdleEvent::Error(e)) => {
+                         warn!("IMAP IDLE watcher error for account {account_id}: {e}");
++                        let _ = trigger_tx.send(ImapWorkerTrigger::ProviderPush);
+                         let _ = idle_provider.disconnect().await;
+                         connected = false;
+                         let delay = backoff.record_failure();
+@@ -1498,6 +1499,7 @@ impl SyncWorker {
+                     }
+                     Err(e) => {
+                         warn!("IMAP IDLE watcher failed for account {account_id}: {e}");
++                        let _ = trigger_tx.send(ImapWorkerTrigger::ProviderPush);
+                         let _ = idle_provider.disconnect().await;
+                         connected = false;
+                         let delay = backoff.record_failure();
 diff --git a/crates/pebble-store/src/messages.rs b/crates/pebble-store/src/messages.rs
 index 9700903..6230040 100644
 --- a/crates/pebble-store/src/messages.rs
