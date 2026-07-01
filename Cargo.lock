@@ -3569,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "pebble"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lettre",
  "mac-notification-sys",
@@ -3604,7 +3604,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "rusqlite",
@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-crypto"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "keyring",
@@ -3630,7 +3630,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-mail"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-imap",
  "async-trait",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-oauth"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "oauth2",
  "pebble-core",
@@ -3672,7 +3672,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-privacy"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ammonia",
  "htmlescape",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-rules"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "pebble-core",
  "serde",
@@ -3693,7 +3693,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-search"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "pebble-core",
  "tantivy",
@@ -3703,7 +3703,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-store"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "pebble-core",
  "r2d2",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "pebble-translate"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "pebble-core",
  "reqwest 0.12.28",

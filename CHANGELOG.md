@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-01
+
+### Added
+
+- Added an option to launch Pebble automatically when you sign in to your computer, under General settings → Startup Behavior (#64).
+- Added a per-account option to allow unencrypted (plaintext) IMAP/SMTP connections for legacy servers that only support plaintext, shown as an explicit opt-in with a security warning when a connection's security is set to "None" (#70).
+
+### Changed
+
+- Updated the desktop release metadata to version 0.1.3.
+
+### Fixed
+
+- Fixed some email links being shown with a literal `&amp;` (for example in password-reset URLs) by no longer double-escaping ampersands when auto-linking plain-text URLs (#68).
+- Fixed the account connection test reporting a false "passed" for accounts with a blank username: it now performs a real authenticated login, so authentication failures surface during testing instead of only after the account is added (#60).
+- Fixed the startup window background color and title-bar theme so the window matches the active theme immediately on launch.
+
 ## [0.1.2] - 2026-06-15
 
 ### Changed
@@ -260,7 +277,8 @@ This release includes:
 - Windows installers are not code-signed yet, so Windows SmartScreen may show a warning.
 - Outlook support is still experimental and depends on Microsoft Graph permissions configured by the user.
 
-[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/QingJ01/Pebble/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/QingJ01/Pebble/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/QingJ01/Pebble/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/QingJ01/Pebble/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/QingJ01/Pebble/compare/v0.0.9...v0.1.0
