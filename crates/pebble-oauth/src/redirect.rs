@@ -8,8 +8,8 @@ use url::Url;
 const SUCCESS_HTML: &str = r#"<!DOCTYPE html>
 <html><head><title>Pebble</title></head>
 <body style="font-family:sans-serif;text-align:center;padding:3rem">
-<h2>Authentication successful</h2>
-<p>You can close this tab and return to Pebble.</p>
+<h2>Authorization received</h2>
+<p>Return to Pebble to finish adding the account.</p>
 </body></html>"#;
 
 const REDIRECT_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes

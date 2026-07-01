@@ -12,9 +12,10 @@ use pebble_crypto::CryptoService;
 use pebble_mail::gmail_sync::TokenRefresher;
 use pebble_oauth::{build_http_client, OAuthConfig, OAuthError, OAuthManager, OAuthNetworkConfig};
 use pebble_store::Store;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
-use tracing::debug;
+use tracing::{debug, error, info, warn};
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
@@ -148,19 +149,42 @@ fn dotenv_lookup_from_str(contents: &str, key: &str) -> Option<String> {
     None
 }
 
-fn dotenv_contents() -> Option<String> {
-    let mut candidates = Vec::new();
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join(".env"));
-        candidates.push(current_dir.join("..").join(".env"));
+fn push_dotenv_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.iter().any(|candidate| candidate == &path) {
+        candidates.push(path);
     }
-    candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"));
-    candidates.push(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(".env"),
+}
+
+fn dotenv_candidate_paths(
+    current_dir: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(exe_dir) = current_exe.and_then(|path| path.parent().map(PathBuf::from)) {
+        push_dotenv_candidate(&mut candidates, exe_dir.join(".env"));
+    }
+
+    if let Some(current_dir) = current_dir {
+        push_dotenv_candidate(&mut candidates, current_dir.join(".env"));
+        push_dotenv_candidate(&mut candidates, current_dir.join("..").join(".env"));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_dotenv_candidate(&mut candidates, manifest_dir.join(".env"));
+    push_dotenv_candidate(
+        &mut candidates,
+        manifest_dir.join("..").join(".env"),
     );
 
+    candidates
+}
+
+fn dotenv_contents() -> Option<String> {
+    let candidates = dotenv_candidate_paths(
+        std::env::current_dir().ok(),
+        std::env::current_exe().ok(),
+    );
     candidates
         .into_iter()
         .find_map(|path| std::fs::read_to_string(path).ok())
@@ -249,6 +273,20 @@ fn validate_oauth_config(config: &OAuthConfig, provider: &str) -> Result<(), Peb
             "OAuth client_id for '{provider}' is not configured. \
              Set the appropriate environment variable before starting the OAuth flow."
         )));
+    }
+    if provider.eq_ignore_ascii_case("gmail")
+        && config
+            .client_secret
+            .as_deref()
+            .map(is_placeholder)
+            .unwrap_or(true)
+    {
+        return Err(PebbleError::Internal(
+            "OAuth client_secret for 'gmail' is not configured. \
+             Set GOOGLE_CLIENT_SECRET in .env next to pebble.exe or as an environment variable, \
+             then restart Pebble."
+                .to_string(),
+        ));
     }
     if let Some(secret) = &config.client_secret {
         if is_placeholder(secret) {
@@ -616,7 +654,14 @@ pub async fn complete_oauth_flow(
     proxy_host: Option<String>,
     proxy_port: Option<u16>,
 ) -> std::result::Result<Account, PebbleError> {
-    let mut config = config_for_provider(&provider)?;
+    info!("Starting OAuth account setup for provider {provider}");
+    let mut config = match config_for_provider(&provider) {
+        Ok(config) => config,
+        Err(e) => {
+            error!("OAuth config validation failed for provider {provider}: {e}");
+            return Err(e);
+        }
+    };
     let account_proxy = oauth_proxy_from_parts(proxy_host, proxy_port)?;
     let effective_proxy = resolve_effective_proxy(
         account_proxy.clone(),
@@ -630,7 +675,11 @@ pub async fn complete_oauth_flow(
     // The actual port is then used in the redirect URI sent to the provider.
     let bound = pebble_oauth::redirect::bind_redirect_listener(config.redirect_port)
         .await
-        .map_err(|e| PebbleError::OAuth(format!("Failed to bind redirect listener: {e}")))?;
+        .map_err(|e| {
+            let err = PebbleError::OAuth(format!("Failed to bind redirect listener: {e}"));
+            error!("OAuth redirect listener failed for provider {provider}: {err}");
+            err
+        })?;
     config.redirect_port = bound.port;
 
     let manager = OAuthManager::new_with_network(config, network.clone());
@@ -639,32 +688,62 @@ pub async fn complete_oauth_flow(
     let (auth_url, pkce_state) = manager
         .start_auth()
         .await
-        .map_err(|e| PebbleError::OAuth(format!("Failed to start OAuth flow: {e}")))?;
+        .map_err(|e| {
+            let err = PebbleError::OAuth(format!("Failed to start OAuth flow: {e}"));
+            error!("OAuth auth URL generation failed for provider {provider}: {err}");
+            err
+        })?;
 
     // Open the authorization URL in the system browser
-    opener::open(&auth_url)
-        .map_err(|e| PebbleError::OAuth(format!("Failed to open browser: {e}")))?;
+    opener::open(&auth_url).map_err(|e| {
+        let err = PebbleError::OAuth(format!("Failed to open browser: {e}"));
+        error!("OAuth browser open failed for provider {provider}: {err}");
+        err
+    })?;
 
     // Wait for the redirect callback with a 5-minute timeout
     let redirect = bound
         .wait()
         .await
-        .map_err(|e| PebbleError::OAuth(format!("OAuth redirect failed: {e}")))?;
+        .map_err(|e| {
+            let err = PebbleError::OAuth(format!("OAuth redirect failed: {e}"));
+            error!("OAuth redirect failed for provider {provider}: {err}");
+            err
+        })?;
+    info!("OAuth browser callback received for provider {provider}");
 
     if !constant_time_eq(&redirect.state, pkce_state.csrf_token.secret()) {
+        error!("OAuth state mismatch for provider {provider}");
         return Err(PebbleError::OAuth("OAuth state mismatch".to_string()));
     }
 
     // Exchange code for tokens
-    let token_pair = manager
-        .complete_auth(&redirect.code, pkce_state)
-        .await
-        .map_err(|e| PebbleError::OAuth(token_exchange_error_message(&provider, &e)))?;
+    let token_pair = match manager.complete_auth(&redirect.code, pkce_state).await {
+        Ok(token_pair) => {
+            info!("OAuth token exchange completed for provider {provider}");
+            token_pair
+        }
+        Err(e) => {
+            let message = token_exchange_error_message(&provider, &e);
+            error!("OAuth token exchange failed for provider {provider}: {message}");
+            return Err(PebbleError::OAuth(message));
+        }
+    };
 
     // Fetch user info from Google/Microsoft to get actual email and display name
-    let (real_email, real_name) = fetch_userinfo(&provider, &token_pair.access_token, &network)
-        .await
-        .unwrap_or_else(|_| (email.clone(), display_name.clone()));
+    let (real_email, real_name) =
+        match fetch_userinfo(&provider, &token_pair.access_token, &network).await {
+            Ok(userinfo) => {
+                info!("OAuth userinfo fetched for provider {provider}");
+                userinfo
+            }
+            Err(e) => {
+                warn!(
+                    "OAuth userinfo fetch failed for provider {provider}; using supplied form values: {e}"
+                );
+                (email.clone(), display_name.clone())
+            }
+        };
 
     let final_email = if real_email.is_empty() {
         email
@@ -676,6 +755,13 @@ pub async fn complete_oauth_flow(
     } else {
         real_name
     };
+    if final_email.trim().is_empty() {
+        let err = PebbleError::OAuth(format!(
+            "Could not determine email address for {provider} OAuth account."
+        ));
+        error!("OAuth account setup failed for provider {provider}: {err}");
+        return Err(err);
+    }
 
     // Create the account
     let now = now_timestamp();
@@ -691,7 +777,10 @@ pub async fn complete_oauth_flow(
         updated_at: now,
     };
 
-    state.store.insert_account(&account)?;
+    if let Err(e) = state.store.insert_account(&account) {
+        error!("OAuth account insert failed for provider {provider}: {e}");
+        return Err(e);
+    }
 
     // If any subsequent step fails, delete the account row to prevent half-creation
     if let Err(e) = (|| -> std::result::Result<(), PebbleError> {
@@ -714,9 +803,14 @@ pub async fn complete_oauth_flow(
     })() {
         // Rollback: remove the partially created account
         let _ = state.store.delete_account(&account.id);
+        error!("OAuth account setup failed after insert for provider {provider}: {e}");
         return Err(e);
     }
 
+    info!(
+        "OAuth account setup completed for provider {provider} account {}",
+        account.id
+    );
     Ok(account)
 }
 
@@ -858,6 +952,21 @@ MICROSOFT_CLIENT_SECRET='microsoft-secret'
     }
 
     #[test]
+    fn dotenv_candidate_paths_prefers_exe_directory() {
+        let current_dir = PathBuf::from("workspace").join("pebble");
+        let current_exe = PathBuf::from("install").join("Pebble").join("pebble.exe");
+
+        let paths = dotenv_candidate_paths(Some(current_dir.clone()), Some(current_exe));
+
+        assert_eq!(
+            paths.first(),
+            Some(&PathBuf::from("install").join("Pebble").join(".env"))
+        );
+        assert_eq!(paths.get(1), Some(&current_dir.join(".env")));
+        assert_eq!(paths.get(2), Some(&current_dir.join("..").join(".env")));
+    }
+
+    #[test]
     fn oauth_config_value_prefers_process_env_then_dotenv_then_compile_env() {
         assert_eq!(
             oauth_config_value_from_sources(
@@ -889,6 +998,36 @@ MICROSOFT_CLIENT_SECRET='microsoft-secret'
             ),
             "from-compile"
         );
+    }
+
+    #[test]
+    fn validate_oauth_config_requires_gmail_client_secret() {
+        let config = OAuthConfig {
+            client_id: "google-client.apps.googleusercontent.com".to_string(),
+            client_secret: None,
+            auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+            token_url: "https://oauth2.googleapis.com/token".to_string(),
+            scopes: vec![],
+            redirect_port: 0,
+        };
+
+        let err = validate_oauth_config(&config, "gmail").unwrap_err();
+
+        assert!(err.to_string().contains("GOOGLE_CLIENT_SECRET"));
+    }
+
+    #[test]
+    fn validate_oauth_config_allows_outlook_without_client_secret() {
+        let config = OAuthConfig {
+            client_id: "microsoft-client".to_string(),
+            client_secret: None,
+            auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".to_string(),
+            token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token".to_string(),
+            scopes: vec![],
+            redirect_port: 0,
+        };
+
+        validate_oauth_config(&config, "outlook").unwrap();
     }
 
     #[test]
