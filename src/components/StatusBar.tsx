@@ -96,11 +96,12 @@ export default function StatusBar() {
       if (!isActiveAccountEvent(event.payload?.account_id)) return;
       if (syncStatusRef.current !== "error") {
         updateSyncStatus("idle");
+        setLastMailError(null);
       }
       refreshMailQueries();
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, [activeAccountId, setSyncStatus, queryClient]);
+  }, [activeAccountId, setLastMailError, setSyncStatus, queryClient]);
 
   // Listen for per-pass sync progress. Background workers are long-lived, so
   // UI "syncing" must track a concrete pass rather than worker lifetime.
@@ -110,8 +111,10 @@ export default function StatusBar() {
       if (!isActiveAccountEvent(account_id)) return;
       if (status === "started") {
         updateSyncStatus("syncing");
+        setLastMailError(null);
       } else if (status === "completed") {
         updateSyncStatus("idle");
+        setLastMailError(null);
         refreshMailQueries();
       } else if (status === "error") {
         updateSyncStatus("error");

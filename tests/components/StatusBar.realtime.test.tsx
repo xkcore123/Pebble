@@ -153,10 +153,43 @@ describe("StatusBar realtime mail events", () => {
     });
 
     expect(mocks.uiState.setSyncStatus).toHaveBeenCalledWith("idle");
+    expect(mocks.uiState.setLastMailError).toHaveBeenCalledWith(null);
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folders"] });
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["messages"] });
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["threads"] });
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folder-unread-counts"] });
+  });
+
+  it("clears a stale sync error when a new sync pass starts", async () => {
+    render(<StatusBar />);
+
+    await waitFor(() => expect(mocks.listeners.has("mail:sync-progress")).toBe(true));
+
+    mocks.listeners.get("mail:sync-progress")?.({
+      payload: {
+        account_id: "account-1",
+        status: "started",
+        phase: "poll",
+      },
+    });
+
+    expect(mocks.uiState.setSyncStatus).toHaveBeenCalledWith("syncing");
+    expect(mocks.uiState.setLastMailError).toHaveBeenCalledWith(null);
+  });
+
+  it("clears a stale sync error when a legacy sync-complete event succeeds", async () => {
+    render(<StatusBar />);
+
+    await waitFor(() => expect(mocks.listeners.has("mail:sync-complete")).toBe(true));
+
+    mocks.listeners.get("mail:sync-complete")?.({
+      payload: {
+        account_id: "account-1",
+      },
+    });
+
+    expect(mocks.uiState.setSyncStatus).toHaveBeenCalledWith("idle");
+    expect(mocks.uiState.setLastMailError).toHaveBeenCalledWith(null);
   });
 
   it("ignores sync progress from another account", async () => {
@@ -208,6 +241,7 @@ describe("StatusBar realtime mail events", () => {
     });
 
     expect(mocks.uiState.setSyncStatus).not.toHaveBeenCalledWith("idle");
+    expect(mocks.uiState.setLastMailError).not.toHaveBeenCalledWith(null);
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folders"] });
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["messages"] });
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["threads"] });

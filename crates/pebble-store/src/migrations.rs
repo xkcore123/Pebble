@@ -2,7 +2,7 @@ use pebble_core::{build_snippet, PebbleError, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
 
-const CURRENT_VERSION: u32 = 14;
+const CURRENT_VERSION: u32 = 15;
 const ACCOUNT_COLOR_PRESETS: [&str; 12] = [
     "#0ea5e9", "#22c55e", "#f59e0b", "#8b5cf6", "#f43f5e", "#14b8a6", "#6366f1", "#f97316",
     "#06b6d4", "#ec4899", "#84cc16", "#3b82f6",
@@ -144,6 +144,97 @@ fn rebuild_snippets(conn: &Connection) -> Result<()> {
             .execute(rusqlite::params![new_snippet, id])
             .map_err(|e| PebbleError::Storage(format!("V13 update failed: {e}")))?;
     }
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    let count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    count > 0
+}
+
+fn install_folder_scoped_remote_guards(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "messages") || !table_exists(conn, "message_folders") {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_messages_account_remote_unique;
+         CREATE INDEX IF NOT EXISTS idx_messages_account_remote
+             ON messages(account_id, remote_id);
+
+         DELETE FROM message_folders
+         WHERE rowid IN (
+             SELECT mf.rowid
+             FROM message_folders mf
+             JOIN messages m ON m.id = mf.message_id
+             WHERE m.is_deleted = 0
+               AND EXISTS (
+                   SELECT 1
+                   FROM message_folders existing_mf
+                   JOIN messages existing_m
+                     ON existing_m.id = existing_mf.message_id
+                   WHERE existing_mf.folder_id = mf.folder_id
+                     AND existing_m.account_id = m.account_id
+                     AND existing_m.remote_id = m.remote_id
+                     AND existing_m.is_deleted = 0
+                     AND existing_m.id < m.id
+               )
+         );
+         DELETE FROM messages
+         WHERE is_deleted = 0
+           AND NOT EXISTS (
+               SELECT 1 FROM message_folders mf WHERE mf.message_id = messages.id
+           );
+
+         DROP TRIGGER IF EXISTS trg_message_folders_unique_live_remote;
+         DROP TRIGGER IF EXISTS trg_messages_unique_live_remote_in_folders;
+         CREATE TRIGGER IF NOT EXISTS trg_message_folders_unique_live_remote
+         BEFORE INSERT ON message_folders
+         WHEN EXISTS (
+             SELECT 1
+             FROM messages new_m
+             JOIN messages existing_m
+               ON existing_m.account_id = new_m.account_id
+              AND existing_m.remote_id = new_m.remote_id
+              AND existing_m.is_deleted = 0
+              AND existing_m.id <> new_m.id
+             JOIN message_folders existing_mf
+               ON existing_mf.message_id = existing_m.id
+              AND existing_mf.folder_id = NEW.folder_id
+             WHERE new_m.id = NEW.message_id
+               AND new_m.is_deleted = 0
+         )
+         BEGIN
+             SELECT RAISE(ABORT, 'duplicate live remote_id in folder');
+         END;
+
+         CREATE TRIGGER IF NOT EXISTS trg_messages_unique_live_remote_in_folders
+         BEFORE UPDATE OF account_id, remote_id, is_deleted ON messages
+         WHEN NEW.is_deleted = 0 AND EXISTS (
+             SELECT 1
+             FROM message_folders new_mf
+             JOIN messages existing_m
+               ON existing_m.account_id = NEW.account_id
+              AND existing_m.remote_id = NEW.remote_id
+              AND existing_m.is_deleted = 0
+              AND existing_m.id <> NEW.id
+             JOIN message_folders existing_mf
+               ON existing_mf.message_id = existing_m.id
+              AND existing_mf.folder_id = new_mf.folder_id
+             WHERE new_mf.message_id = NEW.id
+         )
+         BEGIN
+             SELECT RAISE(ABORT, 'duplicate live remote_id in folder');
+         END;",
+    )
+    .map_err(|e| PebbleError::Storage(format!("Folder-scoped remote guard failed: {e}")))?;
+
     Ok(())
 }
 
@@ -396,43 +487,33 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             .map_err(|e| PebbleError::Storage(format!("Migration V13 commit failed: {e}")))?;
     }
 
-    // V14: enforce at most one LIVE row per (account_id, remote_id). The legacy
-    // idx_messages_account_remote index was non-unique, so a soft-delete followed
-    // by a re-sync that re-fetched the same remote_id inserted a second row
-    // (tombstone + new live copy). Deduplicate existing live rows first, then
-    // replace the index with a partial UNIQUE index scoped to is_deleted = 0 so
-    // tombstones (is_deleted = 1) can still coexist with a fresh live copy.
+    // V14: enforce at most one LIVE row per (account_id, folder_id, remote_id).
+    // IMAP UIDs are mailbox-scoped, so the guard must include the folder;
+    // otherwise providers such as Yandex can legitimately reuse the same UID in
+    // INBOX and Trash and hit a false duplicate.
     if version < 14 {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| PebbleError::Storage(format!("Migration V14 begin failed: {e}")))?;
-        // The messages table always exists in production (created in SCHEMA_V1).
-        // Guard the dedup/index so the migration is a no-op on the minimal
-        // schemas used by migration unit tests that omit messages — and is
-        // harmless if a future store variant lacks it.
-        let messages_count: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if messages_count > 0 {
-            tx.execute_batch(
-                "DELETE FROM messages
-                 WHERE is_deleted = 0
-                   AND id NOT IN (
-                     SELECT MIN(id) FROM messages WHERE is_deleted = 0 GROUP BY account_id, remote_id
-                   );
-                 DROP INDEX IF EXISTS idx_messages_account_remote;
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_account_remote_unique
-                   ON messages(account_id, remote_id) WHERE is_deleted = 0;",
-            )
+        install_folder_scoped_remote_guards(&tx)
             .map_err(|e| PebbleError::Storage(format!("Migration V14 failed: {e}")))?;
-        }
         set_schema_version(&tx, 14)?;
         tx.commit()
             .map_err(|e| PebbleError::Storage(format!("Migration V14 commit failed: {e}")))?;
+    }
+
+    // V15: replace the released V14 account-scoped unique index for existing
+    // users. Fresh installs already get the corrected V14 path above; this
+    // block fixes databases that were previously migrated to user_version 14.
+    if version < 15 {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| PebbleError::Storage(format!("Migration V15 begin failed: {e}")))?;
+        install_folder_scoped_remote_guards(&tx)
+            .map_err(|e| PebbleError::Storage(format!("Migration V15 failed: {e}")))?;
+        set_schema_version(&tx, 15)?;
+        tx.commit()
+            .map_err(|e| PebbleError::Storage(format!("Migration V15 commit failed: {e}")))?;
     }
 
     Ok(())
@@ -609,10 +690,9 @@ mod tests {
     }
 
     #[test]
-    fn migration_v14_dedups_live_rows_and_enforces_partial_unique_index() {
+    fn migration_v14_scopes_live_remote_ids_by_folder() {
         let conn = Connection::open_in_memory().unwrap();
-        // Minimal messages shape at the V13 boundary: only the columns V14
-        // touches. run_migrations from user_version=13 runs just the V14 block.
+        // Minimal schema at the V13 boundary: only the tables V14 touches.
         conn.execute_batch(
             "CREATE TABLE messages (
                 id TEXT PRIMARY KEY,
@@ -620,19 +700,34 @@ mod tests {
                 remote_id TEXT NOT NULL,
                 is_deleted INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE message_folders (
+                message_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                PRIMARY KEY (message_id, folder_id)
+            );
             CREATE INDEX idx_messages_account_remote ON messages(account_id, remote_id);
             PRAGMA user_version = 13;",
         )
         .unwrap();
 
-        // Two LIVE duplicates of the same remote message, one tombstone for it,
-        // and one unrelated live row.
+        // Two LIVE duplicates in INBOX, one legitimate same-UID message in
+        // Trash, one tombstone, and one unrelated live row.
         conn.execute_batch(
             "INSERT INTO messages (id, account_id, remote_id, is_deleted) VALUES
-                ('m-dup-a', 'acct', 'UID:42', 0),
-                ('m-dup-b', 'acct', 'UID:42', 0),
-                ('m-tomb',  'acct', 'UID:42', 1),
+                ('m-inbox-a', 'acct', 'UID:42', 0),
+                ('m-inbox-b', 'acct', 'UID:42', 0),
+                ('m-trash',   'acct', 'UID:42', 0),
+                ('m-tomb',    'acct', 'UID:42', 1),
                 ('m-other', 'acct', 'UID:99', 0);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO message_folders (message_id, folder_id) VALUES
+                ('m-inbox-a', 'inbox'),
+                ('m-inbox-b', 'inbox'),
+                ('m-trash', 'trash'),
+                ('m-tomb', 'inbox'),
+                ('m-other', 'inbox');",
         )
         .unwrap();
 
@@ -643,16 +738,41 @@ mod tests {
             .unwrap();
         assert_eq!(version, CURRENT_VERSION);
 
-        // Duplicate live rows collapse to one; the tombstone survives; the
-        // unrelated live row is untouched.
-        let live_42: i64 = conn
+        let inbox_live_42: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM messages WHERE account_id='acct' AND remote_id='UID:42' AND is_deleted=0",
+                "SELECT COUNT(*)
+                 FROM messages m
+                 JOIN message_folders mf ON mf.message_id = m.id
+                 WHERE m.account_id='acct'
+                   AND m.remote_id='UID:42'
+                   AND m.is_deleted=0
+                   AND mf.folder_id='inbox'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(live_42, 1, "duplicate live rows should be collapsed to one");
+        assert_eq!(
+            inbox_live_42, 1,
+            "duplicate live rows should be collapsed within one folder"
+        );
+
+        let trash_live_42: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM messages m
+                 JOIN message_folders mf ON mf.message_id = m.id
+                 WHERE m.account_id='acct'
+                   AND m.remote_id='UID:42'
+                   AND m.is_deleted=0
+                   AND mf.folder_id='trash'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            trash_live_42, 1,
+            "same remote_id must be allowed in a different folder"
+        );
 
         let tomb_survives: i64 = conn
             .query_row(
@@ -663,15 +783,18 @@ mod tests {
             .unwrap();
         assert_eq!(tomb_survives, 1, "tombstone must not be removed by dedup");
 
-        // Partial unique index: a second LIVE row with the same key is rejected,
-        // but an additional tombstone (is_deleted=1) is still allowed.
-        let dup_live = conn.execute(
+        conn.execute(
             "INSERT INTO messages (id, account_id, remote_id, is_deleted) VALUES ('m-extra','acct','UID:42',0)",
+            [],
+        )
+        .unwrap();
+        let dup_live_inbox = conn.execute(
+            "INSERT INTO message_folders (message_id, folder_id) VALUES ('m-extra','inbox')",
             [],
         );
         assert!(
-            dup_live.is_err(),
-            "second live row must be rejected by the partial unique index"
+            dup_live_inbox.is_err(),
+            "second live row must be rejected inside the same folder"
         );
 
         let dup_tomb = conn.execute(
@@ -681,6 +804,79 @@ mod tests {
         assert!(
             dup_tomb.is_ok(),
             "additional tombstone must be allowed alongside one live row"
+        );
+    }
+
+    #[test]
+    fn migration_v15_replaces_account_scoped_remote_unique_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                remote_id TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE message_folders (
+                message_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                PRIMARY KEY (message_id, folder_id)
+            );
+            INSERT INTO messages (id, account_id, remote_id, is_deleted)
+                VALUES ('m-inbox', 'acct', '492', 0);
+            INSERT INTO message_folders (message_id, folder_id)
+                VALUES ('m-inbox', 'inbox');
+            CREATE UNIQUE INDEX idx_messages_account_remote_unique
+                ON messages(account_id, remote_id) WHERE is_deleted = 0;
+            PRAGMA user_version = 14;",
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_VERSION);
+
+        let old_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='index' AND name='idx_messages_account_remote_unique'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_index_count, 0,
+            "old account-scoped index must be dropped"
+        );
+
+        conn.execute(
+            "INSERT INTO messages (id, account_id, remote_id, is_deleted)
+             VALUES ('m-trash', 'acct', '492', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_folders (message_id, folder_id) VALUES ('m-trash','trash')",
+            [],
+        )
+        .expect("same remote_id should be allowed in a different folder");
+
+        conn.execute(
+            "INSERT INTO messages (id, account_id, remote_id, is_deleted)
+             VALUES ('m-inbox-dup', 'acct', '492', 0)",
+            [],
+        )
+        .unwrap();
+        let dup_inbox = conn.execute(
+            "INSERT INTO message_folders (message_id, folder_id) VALUES ('m-inbox-dup','inbox')",
+            [],
+        );
+        assert!(
+            dup_inbox.is_err(),
+            "same remote_id should still be rejected in the same folder"
         );
     }
 

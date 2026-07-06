@@ -34,7 +34,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    exclude: [...configDefaults.exclude, "**/.worktrees/**"],
+    exclude: [...configDefaults.exclude, "**/.worktrees/**", "tests/tauri/macos-release-config.test.ts"],
     globals: true,
   },
 });

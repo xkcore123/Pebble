@@ -54,8 +54,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
-            throw "Release tags must use vMAJOR.MINOR.PATCH, got '$tag'."
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)(?<suffix>-patched\.\d{14})?$') {
+            throw "Release tags must use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-patched.YYYYMMDDHHMMSS, got '$tag'."
           }
           $version = $Matches.version
 
@@ -74,10 +74,10 @@ jobs:
           }
           foreach ($entry in $versions.GetEnumerator()) {
             if ($entry.Value -ne $version) {
-              throw "$($entry.Key) version '$($entry.Value)' does not match tag '$tag'."
+              throw "$($entry.Key) version '$($entry.Value)' does not match tag app version '$version'."
             }
           }
-          "PEBBLE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PEBBLE_VERSION=$($tag.Substring(1))" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Validate OAuth build config
         env:
@@ -92,6 +92,10 @@ jobs:
             if ([string]::IsNullOrWhiteSpace($value)) {
               throw "$name is not configured in the 'action' GitHub environment."
             }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:MICROSOFT_CLIENT_SECRET)) {
+            "MICROSOFT_CLIENT_SECRET is not configured; continuing with the public/native Microsoft client."
           }
           "OAuth client IDs and Google client secret are configured for this release build."
 
@@ -161,7 +165,10 @@ jobs:
           }
 
           $tag = "${{ inputs.tag || github.ref_name }}"
-          $version = $tag.Substring(1)
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)') {
+            throw "Could not read app version from release tag '$tag'."
+          }
+          $version = $Matches.version
           $title = "Pebble $tag"
           $changelog = Get-Content CHANGELOG.md -Raw
           $escapedVersion = [regex]::Escape($version)
@@ -178,323 +185,9 @@ jobs:
             Invoke-Gh release edit $tag --title $title --notes-file $notesFile
             Invoke-Gh release upload $tag release-artifacts/* --clobber
           } else {
-            Invoke-Gh release create $tag release-artifacts/* --title $title --notes-file $notesFile
+            $releaseFlags = @()
+            if ($tag -match '-patched\.') {
+              $releaseFlags += "--prerelease"
+            }
+            Invoke-Gh release create $tag release-artifacts/* --title $title --notes-file $notesFile @releaseFlags
           }
-
-  linux:
-    name: Linux Package Release
-    needs: windows
-    runs-on: ubuntu-latest
-    environment: action
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9.12.3
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            pkg-config \
-            libgtk-3-dev \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libdbus-1-dev \
-            libkeyutils-dev \
-            patchelf \
-            rpm
-
-      - name: Validate release version
-        run: |
-          set -euo pipefail
-
-          tag="${{ inputs.tag || github.ref_name }}"
-          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "Release tags must use vMAJOR.MINOR.PATCH, got '$tag'." >&2
-            exit 1
-          fi
-          version="${BASH_REMATCH[1]}"
-
-          package_version="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync('package.json', 'utf8')).version)")"
-          tauri_version="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')).version)")"
-          cargo_version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' src-tauri/Cargo.toml | head -n 1)"
-
-          if [[ "$package_version" != "$version" ]]; then
-            echo "package.json version '$package_version' does not match tag '$tag'." >&2
-            exit 1
-          fi
-          if [[ "$tauri_version" != "$version" ]]; then
-            echo "src-tauri/tauri.conf.json version '$tauri_version' does not match tag '$tag'." >&2
-            exit 1
-          fi
-          if [[ "$cargo_version" != "$version" ]]; then
-            echo "src-tauri/Cargo.toml version '$cargo_version' does not match tag '$tag'." >&2
-            exit 1
-          fi
-
-          echo "PEBBLE_VERSION=$version" >> "$GITHUB_ENV"
-
-      - name: Validate OAuth build config
-        env:
-          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          MICROSOFT_CLIENT_ID: ${{ vars.MICROSOFT_CLIENT_ID }}
-          MICROSOFT_CLIENT_SECRET: ${{ secrets.MICROSOFT_CLIENT_SECRET }}
-        run: |
-          set -euo pipefail
-          for name in GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET MICROSOFT_CLIENT_ID; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "$name is not configured in the 'action' GitHub environment." >&2
-              exit 1
-            fi
-          done
-          echo "OAuth client IDs and Google client secret are configured for this release build."
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build Linux packages
-        env:
-          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          MICROSOFT_CLIENT_ID: ${{ vars.MICROSOFT_CLIENT_ID }}
-          MICROSOFT_CLIENT_SECRET: ${{ secrets.MICROSOFT_CLIENT_SECRET }}
-        run: pnpm build:linux
-
-      - name: Collect release artifacts
-        run: |
-          set -euo pipefail
-          artifact_dir="release-artifacts"
-          mkdir -p "$artifact_dir"
-
-          search_dirs=(
-            "target/release/bundle/appimage"
-            "src-tauri/target/release/bundle/appimage"
-            "target/release/bundle/deb"
-            "src-tauri/target/release/bundle/deb"
-            "target/release/bundle/rpm"
-            "src-tauri/target/release/bundle/rpm"
-          )
-
-          found=()
-          for dir in "${search_dirs[@]}"; do
-            if [[ -d "$dir" ]]; then
-              while IFS= read -r -d '' package; do
-                found+=("$package")
-              done < <(find "$dir" -maxdepth 1 -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -print0)
-            fi
-          done
-
-          if [[ "${#found[@]}" -eq 0 ]]; then
-            echo "No Linux package artifacts found in expected bundle directories." >&2
-            exit 1
-          fi
-
-          for package in "${found[@]}"; do
-            cp "$package" "$artifact_dir/$(basename "$package")"
-          done
-
-          for file in "$artifact_dir"/*; do
-            hash="$(sha256sum "$file" | awk '{print $1}')"
-            printf '%s  %s\n' "$hash" "$(basename "$file")" > "$file.sha256"
-          done
-
-          ls -lh "$artifact_dir"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pebble-linux-packages-${{ env.PEBBLE_VERSION }}
-          path: release-artifacts/*
-          if-no-files-found: error
-
-      - name: Upload Linux assets to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
-          gh release upload "$tag" release-artifacts/* --clobber
-
-  macos:
-    name: macOS Release (${{ matrix.arch }})
-    needs: windows
-    runs-on: ${{ matrix.os }}
-    environment: action
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            target: aarch64-apple-darwin
-            arch: arm64
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            arch: x64
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9.12.3
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: ${{ matrix.target }}
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Validate release version
-        run: |
-          set -euo pipefail
-
-          tag="${{ inputs.tag || github.ref_name }}"
-          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "Release tags must use vMAJOR.MINOR.PATCH, got '$tag'." >&2
-            exit 1
-          fi
-          version="${BASH_REMATCH[1]}"
-
-          package_version="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync('package.json', 'utf8')).version)")"
-          tauri_version="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')).version)")"
-          cargo_version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' src-tauri/Cargo.toml | head -n 1)"
-
-          if [[ "$package_version" != "$version" ]]; then
-            echo "package.json version '$package_version' does not match tag '$tag'." >&2
-            exit 1
-          fi
-          if [[ "$tauri_version" != "$version" ]]; then
-            echo "src-tauri/tauri.conf.json version '$tauri_version' does not match tag '$tag'." >&2
-            exit 1
-          fi
-          if [[ "$cargo_version" != "$version" ]]; then
-            echo "src-tauri/Cargo.toml version '$cargo_version' does not match tag '$tag'." >&2
-            exit 1
-          fi
-
-          echo "PEBBLE_VERSION=$version" >> "$GITHUB_ENV"
-
-      - name: Validate OAuth build config
-        env:
-          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          MICROSOFT_CLIENT_ID: ${{ vars.MICROSOFT_CLIENT_ID }}
-          MICROSOFT_CLIENT_SECRET: ${{ secrets.MICROSOFT_CLIENT_SECRET }}
-        run: |
-          set -euo pipefail
-          for name in GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET MICROSOFT_CLIENT_ID; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "$name is not configured in the 'action' GitHub environment." >&2
-              exit 1
-            fi
-          done
-          echo "OAuth client IDs and Google client secret are configured for this release build."
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build macOS app
-        env:
-          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          MICROSOFT_CLIENT_ID: ${{ vars.MICROSOFT_CLIENT_ID }}
-          MICROSOFT_CLIENT_SECRET: ${{ secrets.MICROSOFT_CLIENT_SECRET }}
-        run: pnpm tauri build --target ${{ matrix.target }} --bundles app,dmg
-
-      - name: Collect release artifacts
-        run: |
-          set -euo pipefail
-          artifact_dir="release-artifacts"
-          mkdir -p "$artifact_dir"
-
-          search_dirs=(
-            "target/${{ matrix.target }}/release/bundle/dmg"
-            "target/release/bundle/dmg"
-          )
-
-          found=()
-          for dir in "${search_dirs[@]}"; do
-            if [[ -d "$dir" ]]; then
-              while IFS= read -r -d '' dmg; do
-                found+=("$dmg")
-              done < <(find "$dir" -maxdepth 1 -type f -name "*.dmg" -print0)
-            fi
-          done
-
-          if [[ "${#found[@]}" -eq 0 ]]; then
-            echo "No DMG found in expected macOS bundle directories." >&2
-            exit 1
-          fi
-
-          for dmg in "${found[@]}"; do
-            base="$(basename "$dmg")"
-            stem="${base%.dmg}"
-            cp "$dmg" "$artifact_dir/${stem}-${{ matrix.arch }}.dmg"
-          done
-
-          for file in "$artifact_dir"/*; do
-            hash="$(shasum -a 256 "$file" | awk '{print $1}')"
-            printf '%s  %s\n' "$hash" "$(basename "$file")" > "$file.sha256"
-          done
-
-          ls -lh "$artifact_dir"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pebble-macos-${{ matrix.arch }}-${{ env.PEBBLE_VERSION }}
-          path: release-artifacts/*
-          if-no-files-found: error
-
-      - name: Upload macOS assets to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
-          gh release upload "$tag" release-artifacts/* --clobber

@@ -61,6 +61,13 @@ fn queue_permanent_delete_failure(
     Ok(())
 }
 
+fn is_folder_scoped_remote_duplicate_error(error: &PebbleError) -> bool {
+    matches!(
+        error,
+        PebbleError::Storage(message) if message.contains("duplicate live remote_id in folder")
+    )
+}
+
 /// Returns "archived" or "unarchived" so the frontend can show the correct toast.
 #[tauri::command]
 pub async fn archive_message(
@@ -497,6 +504,7 @@ pub async fn delete_message(
     let source_folder = find_message_folder(&state, &message_id, &msg.account_id)?;
     let trash_folder = find_folder_by_role(&state, &msg.account_id, FolderRole::Trash).ok();
     let is_permanent = source_folder.role == Some(FolderRole::Trash);
+    let is_imap_provider = provider_type == ProviderType::Imap;
 
     let outcome = match provider_type {
         ProviderType::Gmail => match connect_gmail(&state, &msg.account_id).await {
@@ -743,9 +751,24 @@ pub async fn delete_message(
         remove_search_documents(&state, std::slice::from_ref(&message_id))?;
     } else if let Some(trash_folder) = trash_folder {
         if trash_folder.id != source_folder.id {
-            state
+            match state
                 .store
-                .move_message_to_folder(&message_id, &trash_folder.id)?;
+                .move_message_to_folder(&message_id, &trash_folder.id)
+            {
+                Ok(()) => {}
+                Err(e)
+                    if is_imap_provider
+                        && outcome == RemoteMutationOutcome::Applied
+                        && is_folder_scoped_remote_duplicate_error(&e) =>
+                {
+                    warn!(
+                        "IMAP delete for message {} moved remotely, but local Trash already has UID {}; soft-deleting local source copy",
+                        message_id, msg.remote_id
+                    );
+                    state.store.soft_delete_message(&message_id)?;
+                }
+                Err(e) => return Err(e),
+            }
             refresh_search_document(&state, &message_id)?;
         } else {
             state.store.soft_delete_message(&message_id)?;
@@ -1283,5 +1306,16 @@ mod remote_mutation_tests {
         assert!(!remote_mutation_allows_local_commit(
             RemoteMutationOutcome::Failed
         ));
+    }
+
+    #[test]
+    fn folder_scoped_remote_duplicate_storage_errors_are_detected() {
+        let duplicate = PebbleError::Storage("duplicate live remote_id in folder".to_string());
+        let other_storage = PebbleError::Storage("other storage error".to_string());
+        let network = PebbleError::Network("duplicate live remote_id in folder".to_string());
+
+        assert!(is_folder_scoped_remote_duplicate_error(&duplicate));
+        assert!(!is_folder_scoped_remote_duplicate_error(&other_storage));
+        assert!(!is_folder_scoped_remote_duplicate_error(&network));
     }
 }

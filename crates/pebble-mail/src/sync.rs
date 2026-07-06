@@ -1488,6 +1488,7 @@ impl SyncWorker {
                     }
                     Ok(crate::idle::IdleEvent::Error(e)) => {
                         warn!("IMAP IDLE watcher error for account {account_id}: {e}");
+                        let _ = trigger_tx.send(ImapWorkerTrigger::ProviderPush);
                         let _ = idle_provider.disconnect().await;
                         connected = false;
                         let delay = backoff.record_failure();
@@ -1498,6 +1499,7 @@ impl SyncWorker {
                     }
                     Err(e) => {
                         warn!("IMAP IDLE watcher failed for account {account_id}: {e}");
+                        let _ = trigger_tx.send(ImapWorkerTrigger::ProviderPush);
                         let _ = idle_provider.disconnect().await;
                         connected = false;
                         let delay = backoff.record_failure();
