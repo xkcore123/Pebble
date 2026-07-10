@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
     setLastMailError: vi.fn(),
     realtimeStatusByAccount: {},
     setRealtimeStatus: vi.fn(),
+    restoreRealtimeStatus: vi.fn(),
     notificationsEnabled: true,
     keepRunningInBackground: false,
     setKeepRunningInBackground: vi.fn(),
@@ -154,6 +155,7 @@ describe("StatusBar realtime mail events", () => {
 
     expect(mocks.uiState.setSyncStatus).toHaveBeenCalledWith("idle");
     expect(mocks.uiState.setLastMailError).toHaveBeenCalledWith(null);
+    expect(mocks.uiState.restoreRealtimeStatus).toHaveBeenCalledWith("account-1");
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folders"] });
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["messages"] });
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["threads"] });
@@ -206,6 +208,7 @@ describe("StatusBar realtime mail events", () => {
     });
 
     expect(mocks.uiState.setSyncStatus).not.toHaveBeenCalledWith("idle");
+    expect(mocks.uiState.restoreRealtimeStatus).toHaveBeenCalledWith("account-2");
     expect(mocks.invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["folders"] });
     expect(mocks.invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["messages"] });
     expect(mocks.invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["threads"] });

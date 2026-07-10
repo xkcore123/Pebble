@@ -378,6 +378,7 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
     let lower = message.to_ascii_lowercase();
 
     lower.contains("os error 10053")
+        || lower.contains("os error 10054")
         || lower.contains("connection reset")
         || lower.contains("connection aborted")
         || lower.contains("broken pipe")
@@ -2148,6 +2149,16 @@ mod tests {
     fn imap_windows_connection_abort_is_retryable_for_polling() {
         let error = pebble_core::PebbleError::Network(
             "SELECT failed: io: 你的主机中的软件中止了一个已建立的连接。 (os error 10053)"
+                .to_string(),
+        );
+
+        assert!(is_retryable_imap_connection_error(&error));
+    }
+
+    #[test]
+    fn imap_windows_connection_reset_is_retryable_for_polling() {
+        let error = pebble_core::PebbleError::Network(
+            "SELECT failed: io: remote host closed an existing connection (os error 10054)"
                 .to_string(),
         );
 

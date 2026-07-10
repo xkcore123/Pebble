@@ -19,6 +19,7 @@ describe("UIStore", () => {
       networkStatus: "online",
       lastMailError: null,
       realtimeStatusByAccount: {},
+      healthyRealtimeStatusByAccount: {},
       previousView: "inbox",
       pollInterval: 15,
       realtimeMode: "realtime",
@@ -237,6 +238,31 @@ describe("UIStore", () => {
     expect(realtimePreferenceToPollInterval("balanced")).toBe(15);
     expect(realtimePreferenceToPollInterval("battery")).toBe(60);
     expect(realtimePreferenceToPollInterval("manual")).toBe(0);
+  });
+
+  it("restores the last healthy per-account status after a successful sync", () => {
+    const healthyStatus = {
+      account_id: "account-1",
+      mode: "realtime" as const,
+      provider: "imap",
+      last_success_at: 100,
+      next_retry_at: null,
+      message: null,
+    };
+
+    useUIStore.getState().setRealtimeStatus("account-1", healthyStatus);
+    useUIStore.getState().setRealtimeStatus("account-1", {
+      ...healthyStatus,
+      mode: "offline",
+      message: "os error 10054",
+    });
+    useUIStore.getState().restoreRealtimeStatus("account-1");
+
+    const restored = useUIStore.getState().realtimeStatusByAccount["account-1"];
+    expect(restored.mode).toBe("realtime");
+    expect(restored.message).toBe(null);
+    expect(restored.next_retry_at).toBe(null);
+    expect(restored.last_success_at).toBeGreaterThan(100);
   });
 
   it("defaults desktop notifications to enabled when the user has no stored preference", () => {

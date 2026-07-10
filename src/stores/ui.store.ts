@@ -108,6 +108,10 @@ export function realtimePreferenceToPollInterval(mode: RealtimePreference): numb
   }
 }
 
+function isHealthyRealtimeMode(mode: RealtimeMode): boolean {
+  return mode === "realtime" || mode === "polling" || mode === "manual";
+}
+
 const initialRealtimeMode = readRealtimePreference();
 const initialNotificationsEnabled = readNotificationsEnabledPreference();
 const initialKeepRunningInBackground = readKeepRunningInBackgroundPreference();
@@ -138,6 +142,7 @@ interface UIState {
   networkStatus: NetworkStatus;
   lastMailError: string | null;
   realtimeStatusByAccount: Record<string, RealtimeStatus>;
+  healthyRealtimeStatusByAccount: Record<string, RealtimeStatus>;
   realtimeMode: RealtimePreference;
   notificationsEnabled: boolean;
   setNotificationsEnabled: (enabled: boolean) => void;
@@ -159,6 +164,7 @@ interface UIState {
   setNetworkStatus: (status: NetworkStatus) => void;
   setLastMailError: (error: string | null) => void;
   setRealtimeStatus: (accountId: string, status: RealtimeStatus) => void;
+  restoreRealtimeStatus: (accountId: string) => void;
   setRealtimeMode: (mode: RealtimePreference) => void;
   pollInterval: number;
   setPollInterval: (secs: number) => void;
@@ -182,6 +188,7 @@ export const useUIStore = create<UIState>((set) => ({
   networkStatus: "online",
   lastMailError: null,
   realtimeStatusByAccount: {},
+  healthyRealtimeStatusByAccount: {},
   realtimeMode: initialRealtimeMode,
   notificationsEnabled: initialNotificationsEnabled,
   setNotificationsEnabled: (enabled) => {
@@ -285,12 +292,39 @@ export const useUIStore = create<UIState>((set) => ({
   setNetworkStatus: (status) => set({ networkStatus: status }),
   setLastMailError: (error) => set({ lastMailError: error }),
   setRealtimeStatus: (accountId, status) =>
-    set((state) => ({
-      realtimeStatusByAccount: {
-        ...state.realtimeStatusByAccount,
-        [accountId]: status,
-      },
-    })),
+    set((state) => {
+      const healthy = isHealthyRealtimeMode(status.mode);
+      return {
+        realtimeStatusByAccount: {
+          ...state.realtimeStatusByAccount,
+          [accountId]: status,
+        },
+        healthyRealtimeStatusByAccount: healthy
+          ? {
+              ...state.healthyRealtimeStatusByAccount,
+              [accountId]: status,
+            }
+          : state.healthyRealtimeStatusByAccount,
+      };
+    }),
+  restoreRealtimeStatus: (accountId) =>
+    set((state) => {
+      const current = state.realtimeStatusByAccount[accountId];
+      const healthy = state.healthyRealtimeStatusByAccount[accountId];
+      if (!current || !healthy || isHealthyRealtimeMode(current.mode)) {
+        return state;
+      }
+      return {
+        realtimeStatusByAccount: {
+          ...state.realtimeStatusByAccount,
+          [accountId]: {
+            ...healthy,
+            last_success_at: Math.floor(Date.now() / 1000),
+            next_retry_at: null,
+          },
+        },
+      };
+    }),
   setRealtimeMode: (mode) => {
     const pollInterval = realtimePreferenceToPollInterval(mode);
     localStorage.setItem(REALTIME_PREFERENCE_KEY, mode);

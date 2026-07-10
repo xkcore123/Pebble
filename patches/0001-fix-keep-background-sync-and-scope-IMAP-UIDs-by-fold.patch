@@ -1,8 +1,16 @@
 diff --git a/crates/pebble-mail/src/sync.rs b/crates/pebble-mail/src/sync.rs
-index bdd7a6a..c92ab4d 100644
+index bdd7a6a..e420b48 100644
 --- a/crates/pebble-mail/src/sync.rs
 +++ b/crates/pebble-mail/src/sync.rs
-@@ -1488,6 +1488,7 @@ impl SyncWorker {
+@@ -378,6 +378,7 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
+     let lower = message.to_ascii_lowercase();
+ 
+     lower.contains("os error 10053")
++        || lower.contains("os error 10054")
+         || lower.contains("connection reset")
+         || lower.contains("connection aborted")
+         || lower.contains("broken pipe")
+@@ -1488,6 +1489,7 @@ impl SyncWorker {
                      }
                      Ok(crate::idle::IdleEvent::Error(e)) => {
                          warn!("IMAP IDLE watcher error for account {account_id}: {e}");
@@ -10,7 +18,7 @@ index bdd7a6a..c92ab4d 100644
                          let _ = idle_provider.disconnect().await;
                          connected = false;
                          let delay = backoff.record_failure();
-@@ -1498,6 +1499,7 @@ impl SyncWorker {
+@@ -1498,6 +1500,7 @@ impl SyncWorker {
                      }
                      Err(e) => {
                          warn!("IMAP IDLE watcher failed for account {account_id}: {e}");
@@ -18,6 +26,23 @@ index bdd7a6a..c92ab4d 100644
                          let _ = idle_provider.disconnect().await;
                          connected = false;
                          let delay = backoff.record_failure();
+@@ -2152,6 +2155,16 @@ mod tests {
+         assert!(is_retryable_imap_connection_error(&error));
+     }
+ 
++    #[test]
++    fn imap_windows_connection_reset_is_retryable_for_polling() {
++        let error = pebble_core::PebbleError::Network(
++            "SELECT failed: io: remote host closed an existing connection (os error 10054)"
++                .to_string(),
++        );
++
++        assert!(is_retryable_imap_connection_error(&error));
++    }
++
+     #[test]
+     fn imap_rustls_unexpected_eof_is_retryable_for_polling() {
+         let error = pebble_core::PebbleError::Network(
 diff --git a/crates/pebble-store/src/messages.rs b/crates/pebble-store/src/messages.rs
 index 9700903..6230040 100644
 --- a/crates/pebble-store/src/messages.rs

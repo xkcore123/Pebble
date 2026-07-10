@@ -49,6 +49,7 @@ export default function StatusBar() {
   const setLastMailError = useUIStore((s) => s.setLastMailError);
   const realtimeStatusByAccount = useUIStore((s) => s.realtimeStatusByAccount);
   const setRealtimeStatus = useUIStore((s) => s.setRealtimeStatus);
+  const restoreRealtimeStatus = useUIStore((s) => s.restoreRealtimeStatus);
   const notificationsEnabled = useUIStore((s) => s.notificationsEnabled);
   const keepRunningInBackground = useUIStore((s) => s.keepRunningInBackground);
   const setKeepRunningInBackground = useUIStore((s) => s.setKeepRunningInBackground);
@@ -108,6 +109,9 @@ export default function StatusBar() {
   useEffect(() => {
     const unlisten = listen<SyncProgressPayload>("mail:sync-progress", (event) => {
       const { account_id, status, message } = event.payload;
+      if (status === "completed" && account_id) {
+        restoreRealtimeStatus(account_id);
+      }
       if (!isActiveAccountEvent(account_id)) return;
       if (status === "started") {
         updateSyncStatus("syncing");
@@ -124,7 +128,7 @@ export default function StatusBar() {
       }
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, [activeAccountId, setLastMailError, setSyncStatus, queryClient]);
+  }, [activeAccountId, restoreRealtimeStatus, setLastMailError, setSyncStatus, queryClient]);
 
   // Listen for new mail events: incremental data refresh
   useEffect(() => {
