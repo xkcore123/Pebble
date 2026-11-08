@@ -237,6 +237,39 @@ describe("StatusBar realtime mail events", () => {
     expect(mocks.uiState.setSyncStatus).not.toHaveBeenCalledWith("idle");
   });
 
+  it("keeps a newer error visible for its own timeout", () => {
+    vi.useFakeTimers();
+    const view = render(<StatusBar />);
+    try {
+      const emit = mocks.listeners.get("mail:error")!;
+      emit({ payload: { message: "first failure" } });
+      vi.advanceTimersByTime(5_000);
+      emit({ payload: { message: "second failure" } });
+      mocks.uiState.setLastMailError.mockClear();
+      vi.advanceTimersByTime(5_000);
+      expect(mocks.uiState.setLastMailError).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(5_000);
+      expect(mocks.uiState.setLastMailError).toHaveBeenCalledWith(null);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels the error timeout when unmounted", () => {
+    vi.useFakeTimers();
+    const view = render(<StatusBar />);
+    try {
+      mocks.listeners.get("mail:error")!({ payload: { message: "failure" } });
+      view.unmount();
+      mocks.uiState.setLastMailError.mockClear();
+      vi.advanceTimersByTime(10_000);
+      expect(mocks.uiState.setLastMailError).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a sync error when a sync pass fails", async () => {
     render(<StatusBar />);
 

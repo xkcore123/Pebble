@@ -330,9 +330,20 @@ type ImapSession = async_imap::Session<PrefixedStream<InnerStream>>;
 
 const IMAP_CONNECT_TIMEOUT_SECS: u64 = 15;
 const IMAP_COMMAND_TIMEOUT_SECS: u64 = 45;
+const IMAP_CLEANUP_TIMEOUT_SECS: u64 = 5;
 
 fn imap_timeout_error(operation: &str, seconds: u64) -> PebbleError {
     PebbleError::Network(format!("{operation} timed out after {seconds}s"))
+}
+
+fn imap_login_error(error: async_imap::error::Error) -> PebbleError {
+    let message = format!("IMAP login failed: {error}");
+    match error {
+        async_imap::error::Error::Io(_) | async_imap::error::Error::ConnectionLost => {
+            PebbleError::Network(message)
+        }
+        _ => PebbleError::Auth(message),
+    }
 }
 
 async fn with_imap_timeout<T, E, Fut>(operation: &str, seconds: u64, future: Fut) -> Result<T>
@@ -734,7 +745,7 @@ impl ImapProvider {
         )
         .await
         .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
-        .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))
+        .map_err(|(e, _)| imap_login_error(e))
     }
 
     /// Establish a TCP connection, optionally through a SOCKS5 proxy.
@@ -832,7 +843,7 @@ impl ImapProvider {
                 )
                 .await
                 .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
-                .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))?
+                .map_err(|(e, _)| imap_login_error(e))?
             }
             ConnectionSecurity::StartTls => {
                 // Connect plain, read greeting, optionally send ID, STARTTLS, upgrade TLS.
@@ -872,7 +883,7 @@ impl ImapProvider {
                 )
                 .await
                 .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
-                .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))?
+                .map_err(|(e, _)| imap_login_error(e))?
             }
         };
 
@@ -2070,17 +2081,8 @@ impl ImapProvider {
         if let Err(e) =
             with_imap_timeout("IDLE init", IMAP_COMMAND_TIMEOUT_SECS, idle_handle.init()).await
         {
-            // init() failed; the handle still owns the session.
-            // Call done() to recover the session.
-            match idle_handle.done().await {
-                Ok(recovered) => {
-                    let mut guard = self.session.lock().await;
-                    *guard = Some(recovered);
-                }
-                Err(_) => {
-                    // Session is lost; caller will need to reconnect.
-                }
-            }
+            // A failed/timed-out IDLE init leaves protocol state uncertain.
+            // Drop the session instead of waiting indefinitely for DONE.
             return Err(e);
         }
 
@@ -2100,14 +2102,15 @@ impl ImapProvider {
             Err(e) => super::idle::IdleEvent::Error(format!("IDLE wait error: {e}")),
         };
 
-        match idle_handle.done().await {
+        match with_imap_timeout("IDLE DONE", IMAP_CLEANUP_TIMEOUT_SECS, idle_handle.done()).await {
             Ok(recovered) => {
                 let mut guard = self.session.lock().await;
                 *guard = Some(recovered);
             }
-            Err(_) => {
+            Err(e) => {
                 // Session is lost; caller will need to reconnect.
-                tracing::warn!("Failed to recover session after IDLE DONE");
+                tracing::warn!("Failed to recover session after IDLE DONE: {e}");
+                return Err(e);
             }
         }
 
@@ -2117,9 +2120,11 @@ impl ImapProvider {
     /// Disconnect from the IMAP server.
     pub async fn disconnect(&self) -> Result<()> {
         let mut guard = self.session.lock().await;
-        if let Some(sess) = guard.as_mut() {
-            let _ = sess.logout().await;
-            *guard = None;
+        // Clear the slot before awaiting cleanup: cancellation must not leave
+        // a dead session installed, and an unresponsive peer cannot block
+        // reconnection or application shutdown indefinitely.
+        if let Some(mut sess) = guard.take() {
+            let _ = with_imap_timeout("LOGOUT", IMAP_CLEANUP_TIMEOUT_SECS, sess.logout()).await;
         }
         Ok(())
     }
@@ -2210,6 +2215,55 @@ mod tls_config_tests {
     use super::{
         build_native_tls_connector, build_tls_connector, imap_timeout_error, ImapConfig, SmtpConfig,
     };
+
+    #[test]
+    fn login_transport_failure_is_not_misreported_as_bad_credentials() {
+        let error =
+            async_imap::error::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(matches!(
+            super::imap_login_error(error),
+            pebble_core::PebbleError::Network(_)
+        ));
+        assert!(matches!(
+            super::imap_login_error(async_imap::error::Error::ConnectionLost),
+            pebble_core::PebbleError::Network(_)
+        ));
+        assert!(matches!(
+            super::imap_login_error(async_imap::error::Error::No("Invalid credentials".into())),
+            pebble_core::PebbleError::Auth(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unresponsive_logout_is_bounded_and_clears_session() {
+        let server =
+            crate::test_imap::Server::start(crate::test_imap::Behavior::SilentLogout).await;
+        let provider = super::ImapProvider::new(server.config());
+        provider.connect().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), provider.disconnect())
+            .await
+            .expect("LOGOUT must not block reconnection forever")
+            .unwrap();
+        assert!(provider.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unresponsive_idle_done_reports_failure_not_timeout_success() {
+        let server = crate::test_imap::Server::start(crate::test_imap::Behavior::SilentDone).await;
+        let provider = super::ImapProvider::new(server.config());
+        provider.connect().await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            provider.idle_wait("INBOX", std::time::Duration::from_millis(10)),
+        )
+        .await
+        .expect("IDLE DONE must not hang");
+        assert!(
+            result.is_err(),
+            "failed DONE must trigger watcher reconnect"
+        );
+        assert!(provider.session.lock().await.is_none());
+    }
 
     #[test]
     fn build_tls_connector_returns_result() {

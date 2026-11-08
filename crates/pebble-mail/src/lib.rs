@@ -14,6 +14,9 @@ pub mod smtp;
 pub mod sync;
 pub mod thread;
 
+#[cfg(test)]
+mod test_imap;
+
 pub use gmail_sync::GmailSyncWorker;
 pub use imap::{ConnectionSecurity, ImapConfig, ImapProvider, ProxyConfig, SmtpConfig};
 pub use outlook_sync::OutlookSyncWorker;

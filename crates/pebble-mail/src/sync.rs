@@ -541,7 +541,9 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
         || lower.contains("connection aborted")
         || lower.contains("broken pipe")
         || lower.contains("connection closed")
+        || lower.contains("connection lost")
         || lower.contains("closed connection")
+        || lower.contains("status: bye")
         || lower.contains("tls close_notify")
         || lower.contains("unexpected eof")
         || lower.contains("unexpected-eof")
@@ -1715,19 +1717,19 @@ impl SyncWorker {
             return Ok(());
         }
 
-        let mut first_recovered_error = None;
+        let mut first_error = None;
         for folder in folders
             .iter()
             .filter(|folder| should_poll_imap_folder_for_scope(folder, scope))
         {
             if let Some(e) = self.poll_imap_folder_with_reconnect(folder).await {
-                if first_recovered_error.is_none() {
-                    first_recovered_error = Some(e);
+                if first_error.is_none() {
+                    first_error = Some(e);
                 }
             }
         }
 
-        if let Some(e) = first_recovered_error {
+        if let Some(e) = first_error {
             return Err(e);
         }
 
@@ -1740,7 +1742,10 @@ impl SyncWorker {
     ) -> Option<PebbleError> {
         match self.poll_imap_folder_once(folder).await {
             Ok(()) => None,
-            Err(e) if is_missing_imap_mailbox_error(&e) => {
+            Err(e)
+                if is_missing_imap_mailbox_error(&e)
+                    && folder.role != Some(pebble_core::FolderRole::Inbox) =>
+            {
                 debug!(
                     "Skipping unavailable IMAP folder {} ({}) for account {}: {}",
                     folder.name, folder.remote_id, self.base.account_id, e
@@ -1767,9 +1772,7 @@ impl SyncWorker {
                                     folder.name, retry_error
                                 ),
                             );
-                            if is_retryable_imap_connection_error(&retry_error) {
-                                return Some(retry_error);
-                            }
+                            return Some(retry_error);
                         }
                         None
                     }
@@ -1791,7 +1794,7 @@ impl SyncWorker {
                     "poll",
                     &format!("Poll failed for folder {}: {}", folder.name, e),
                 );
-                None
+                Some(e)
             }
         }
     }
@@ -1850,7 +1853,10 @@ impl SyncWorker {
     async fn reconcile_folder(&self, folder: &pebble_core::Folder) -> Result<()> {
         match self.reconcile_folder_once(folder).await {
             Ok(()) => Ok(()),
-            Err(e) if is_missing_imap_mailbox_error(&e) => {
+            Err(e)
+                if is_missing_imap_mailbox_error(&e)
+                    && folder.role != Some(pebble_core::FolderRole::Inbox) =>
+            {
                 debug!(
                     "Skipping unavailable IMAP folder {} ({}) during reconcile for account {}: {}",
                     folder.name, folder.remote_id, self.base.account_id, e
@@ -2039,21 +2045,9 @@ impl SyncWorker {
                     break;
                 }
 
-                if backoff.is_circuit_open() {
-                    let delay = backoff.current_delay();
-                    warn!(
-                        "IMAP IDLE watcher circuit open for account {} ({} failures), waiting {:?}",
-                        account_id,
-                        backoff.failure_count(),
-                        delay
-                    );
-                    match tokio::time::timeout(delay, stop_rx.changed()).await {
-                        Ok(Ok(())) if *stop_rx.borrow() => break,
-                        _ => {}
-                    }
-                    continue;
-                }
-
+                // Failure branches already wait with capped backoff. Always
+                // attempt the next connection afterwards; continuing merely
+                // because the circuit is open would prevent recovery forever.
                 if !connected {
                     match idle_provider.connect().await {
                         Ok(()) => {
@@ -2125,21 +2119,59 @@ impl SyncWorker {
         })
     }
 
+    async fn connect_for_sync(&self, config: &SyncConfig) -> bool {
+        let mut stop_rx = self.stop_rx.clone();
+        let mut backoff = SyncBackoff::new();
+        loop {
+            if *stop_rx.borrow() {
+                return false;
+            }
+            let result = tokio::select! {
+                result = self.provider.connect() => result,
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        return false;
+                    }
+                    continue;
+                }
+            };
+            match result {
+                Ok(()) => return true,
+                Err(e) => {
+                    warn!(
+                        "Failed to connect for account {}: {}",
+                        self.base.account_id, e
+                    );
+                    self.base
+                        .emit_error("connection", &format!("Failed to connect: {e}"));
+                    self.base.emit_sync_error("connection", &e.to_string());
+                    if config.manual_only() || !matches!(e, PebbleError::Network(_)) {
+                        return false;
+                    }
+                    let delay = backoff.record_failure();
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        changed = stop_rx.changed() => {
+                            if changed.is_err() || *stop_rx.borrow() {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Run the sync worker loop until the stop signal is received.
     pub async fn run(
         &self,
         config: SyncConfig,
         trigger_rx: Option<mpsc::UnboundedReceiver<SyncTrigger>>,
     ) {
-        // Connect and do initial sync
-        if let Err(e) = self.provider.connect().await {
-            error!(
-                "Failed to connect for account {}: {}",
-                self.base.account_id, e
-            );
-            self.base
-                .emit_error("connection", &format!("Failed to connect: {}", e));
-            self.base.emit_sync_error("connection", &e.to_string());
+        // A transient startup outage must not permanently terminate a
+        // background worker. Manual runs and rejected credentials still fail
+        // promptly instead of retrying indefinitely.
+        if !self.connect_for_sync(&config).await {
             return;
         }
 
@@ -2497,6 +2529,160 @@ mod tests {
     use super::*;
     use pebble_core::{Folder, FolderRole};
     use std::io::{self, Write};
+
+    async fn poll_against_fixture(
+        behavior: crate::test_imap::Behavior,
+    ) -> (Result<()>, Vec<String>, usize) {
+        let server = crate::test_imap::Server::start(behavior).await;
+        let provider = Arc::new(ImapMailProvider::new(server.config()));
+        provider.connect().await.unwrap();
+        let store = test_store_with_message("recovery-message");
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let worker = SyncWorker::new("account-1", provider, store, stop_rx, std::env::temp_dir())
+            .with_progress_tx(progress_tx);
+        let result = tokio::time::timeout(Duration::from_secs(10), worker.poll_new_messages())
+            .await
+            .expect("poll must not hang");
+        let mut statuses = Vec::new();
+        while let Ok(progress) = progress_rx.try_recv() {
+            statuses.push(progress.status);
+        }
+        (result, statuses, server.login_count())
+    }
+
+    #[tokio::test]
+    async fn denied_imap_poll_reports_error_not_success() {
+        let (result, statuses, logins) =
+            poll_against_fixture(crate::test_imap::Behavior::SelectDenied).await;
+        assert!(result.is_err());
+        assert_eq!(statuses, ["started", "error"]);
+        assert_eq!(logins, 1, "permission errors must not trigger reconnects");
+    }
+
+    #[tokio::test]
+    async fn missing_inbox_is_not_silently_skipped_during_poll() {
+        let (result, statuses, _) =
+            poll_against_fixture(crate::test_imap::Behavior::MissingInbox).await;
+        assert!(result.is_err());
+        assert_eq!(statuses, ["started", "error"]);
+    }
+
+    #[tokio::test]
+    async fn imap_bye_reconnects_and_completes_poll() {
+        let (result, statuses, logins) =
+            poll_against_fixture(crate::test_imap::Behavior::ByeThenEmpty).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(statuses, ["started", "completed"]);
+        assert_eq!(logins, 2);
+    }
+
+    #[tokio::test]
+    async fn denied_poll_after_reconnect_still_reports_error() {
+        let (result, statuses, logins) =
+            poll_against_fixture(crate::test_imap::Behavior::ByeThenDenied).await;
+        assert!(result.is_err());
+        assert_eq!(statuses, ["started", "error"]);
+        assert_eq!(logins, 2, "retry must be bounded");
+    }
+
+    #[tokio::test]
+    async fn background_startup_recovers_from_transient_login_disconnect() {
+        let server =
+            crate::test_imap::Server::start(crate::test_imap::Behavior::DropFirstLogin).await;
+        let provider = Arc::new(ImapMailProvider::new(server.config()));
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let worker = SyncWorker::new(
+            "account-1",
+            provider,
+            test_store_with_message("startup"),
+            stop_rx,
+            std::env::temp_dir(),
+        );
+        let connected = tokio::time::timeout(
+            Duration::from_secs(25),
+            worker.connect_for_sync(&SyncConfig::default()),
+        )
+        .await
+        .expect("startup should recover after backoff");
+        assert!(connected);
+        assert_eq!(server.login_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn manual_startup_does_not_retry_failed_login() {
+        let server =
+            crate::test_imap::Server::start(crate::test_imap::Behavior::DropFirstLogin).await;
+        let provider = Arc::new(ImapMailProvider::new(server.config()));
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let worker = SyncWorker::new(
+            "account-1",
+            provider,
+            test_store_with_message("manual"),
+            stop_rx,
+            std::env::temp_dir(),
+        );
+        let config = SyncConfig {
+            poll_interval_secs: 0,
+            ..Default::default()
+        };
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(3), worker.connect_for_sync(&config))
+                .await
+                .unwrap()
+        );
+        assert_eq!(server.login_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn background_startup_does_not_retry_rejected_credentials() {
+        let server = crate::test_imap::Server::start(crate::test_imap::Behavior::RejectLogin).await;
+        let provider = Arc::new(ImapMailProvider::new(server.config()));
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let worker = SyncWorker::new(
+            "account-1",
+            provider,
+            test_store_with_message("auth"),
+            stop_rx,
+            std::env::temp_dir(),
+        );
+        assert!(!tokio::time::timeout(
+            Duration::from_secs(3),
+            worker.connect_for_sync(&SyncConfig::default())
+        )
+        .await
+        .unwrap());
+        assert_eq!(server.login_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn background_startup_backoff_can_be_stopped() {
+        let server =
+            crate::test_imap::Server::start(crate::test_imap::Behavior::DropFirstLogin).await;
+        let provider = Arc::new(ImapMailProvider::new(server.config()));
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+        let worker = SyncWorker::new(
+            "account-1",
+            provider,
+            test_store_with_message("stop"),
+            stop_rx,
+            std::env::temp_dir(),
+        )
+        .with_error_tx(error_tx);
+        let task =
+            tokio::spawn(async move { worker.connect_for_sync(&SyncConfig::default()).await });
+        tokio::time::timeout(Duration::from_secs(3), error_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        stop_tx.send(true).unwrap();
+        assert!(!tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap());
+        assert_eq!(server.login_count(), 1);
+    }
 
     struct FailingAttachmentWriter {
         fail_write: bool,

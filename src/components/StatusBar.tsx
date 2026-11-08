@@ -69,12 +69,15 @@ export default function StatusBar() {
 
   // Listen for mail:error events from Rust backend
   useEffect(() => {
+    let clearErrorTimer: ReturnType<typeof setTimeout> | undefined;
     const unlisten = listen<MailErrorPayload>("mail:error", (event) => {
+      if (clearErrorTimer !== undefined) clearTimeout(clearErrorTimer);
       setLastMailError(event.payload.message);
-      // Auto-clear error after 10 seconds
-      setTimeout(() => setLastMailError(null), 10_000);
+      // A previous error's timer must not erase a newer error.
+      clearErrorTimer = setTimeout(() => setLastMailError(null), 10_000);
     });
     return () => {
+      if (clearErrorTimer !== undefined) clearTimeout(clearErrorTimer);
       unlisten.then((fn) => fn());
     };
   }, [setLastMailError]);
