@@ -89,22 +89,6 @@ jobs:
       - name: Build desktop package
         run: pnpm ${{ matrix.build_script }}
 
-      - name: Upload Windows package artifacts
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pebble-windows-packages
-          path: target/release/bundle/nsis/*.exe
-          if-no-files-found: error
-
-      - name: Upload macOS package artifacts
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pebble-macos-packages
-          path: target/release/bundle/dmg/*.dmg
-          if-no-files-found: error
-
       - name: Upload Linux package artifacts
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4

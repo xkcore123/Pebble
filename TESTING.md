@@ -2,6 +2,10 @@
 
 ## Windows test packages
 
+The maintained fork now builds from `personal` using **Personal Build**, with
+Windows/macOS/Linux artifacts and no PR to `master` required. `master` stays an
+upstream-only mirror. See `FORK-MAINTENANCE.md` for sync and conflict handling.
+
 Push a `fix/**` branch to run **Windows Test Build**. The workflow runs the
 frontend and Rust workspace tests, then uploads the NSIS installer and standalone
 `pebble.exe` as an Actions artifact. The artifact name includes the commit SHA.
