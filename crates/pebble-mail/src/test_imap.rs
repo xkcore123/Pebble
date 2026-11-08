@@ -20,6 +20,7 @@ pub(crate) enum Behavior {
     TrashMailbox,
     NoTrash,
     ListDenied,
+    PartialListDenied,
     SilentList,
     SilentListCollect,
 }
@@ -87,6 +88,7 @@ impl Server {
                                     stream.get_mut().write_all(b"* LIST () \"/\" \"INBOX\"\r\n").await.unwrap();
                                     std::future::pending::<String>().await
                                 }
+                                Behavior::PartialListDenied => format!("* LIST (\\Trash) \"/\" \"Trash\"\r\n{tag} NO LIST denied\r\n"),
                                 Behavior::ListDenied => format!("{tag} NO LIST denied\r\n"),
                                 Behavior::TrashMailbox => format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"&XfJSIJZk-\"\r\n{tag} OK LIST completed\r\n"),
                                 _ => format!("* LIST () \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n"),

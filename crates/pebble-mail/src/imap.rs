@@ -1230,27 +1230,74 @@ impl ImapProvider {
             .as_mut()
             .ok_or_else(|| PebbleError::Network("Not connected".to_string()))?;
 
-        let mailboxes: Vec<(String, Vec<NameAttribute<'static>>)> =
-            with_imap_timeout("LIST", seconds, async {
-                let stream = sess
-                    .list(None, Some("*"))
+        // async-imap 0.10's LIST stream drops tagged NO/BAD completions.
+        // Read parsed responses directly so a rejected/truncated LIST cannot
+        // masquerade as an empty mailbox list or a successful partial result.
+        let result = with_imap_timeout("LIST", seconds, async {
+            use async_imap::imap_proto::{MailboxDatum, Response, Status};
+            let tag = sess
+                .run_command("LIST \"\" \"*\"")
+                .await
+                .map_err(|e| PebbleError::Network(e.to_string()))?;
+            let mut mailboxes: Vec<(String, Vec<NameAttribute<'static>>)> = Vec::new();
+            loop {
+                let response = sess
+                    .read_response()
                     .await
-                    .map_err(|e| PebbleError::Network(format!("LIST failed: {e}")))?;
-                stream
-                    .map_ok(|n| {
-                        let attributes = n
-                            .attributes()
-                            .iter()
-                            .cloned()
-                            .map(NameAttribute::into_owned)
-                            .collect();
-                        (n.name().to_string(), attributes)
-                    })
-                    .try_collect()
-                    .await
-                    .map_err(|e| PebbleError::Network(format!("LIST collect: {e}")))
-            })
-            .await?;
+                    .ok_or_else(|| PebbleError::Network("Connection lost during LIST".into()))?
+                    .map_err(|e| PebbleError::Network(e.to_string()))?;
+                match response.parsed() {
+                    Response::MailboxData(MailboxDatum::List {
+                        name,
+                        name_attributes,
+                        ..
+                    }) => {
+                        mailboxes.push((
+                            name.to_string(),
+                            name_attributes
+                                .iter()
+                                .cloned()
+                                .map(NameAttribute::into_owned)
+                                .collect(),
+                        ));
+                    }
+                    Response::Done {
+                        tag: completed,
+                        status,
+                        information,
+                        ..
+                    } if *completed == tag => {
+                        return if *status == Status::Ok {
+                            Ok(mailboxes)
+                        } else {
+                            Err(PebbleError::Network(format!(
+                                "LIST rejected: {:?}: {}",
+                                status,
+                                information.as_deref().unwrap_or("No server details")
+                            )))
+                        };
+                    }
+                    Response::Data {
+                        status: Status::Bye,
+                        ..
+                    } => {
+                        return Err(PebbleError::Network("Server sent BYE during LIST".into()));
+                    }
+                    // Folder discovery does not consume mailbox updates; the
+                    // sync worker reconciles mailbox contents separately.
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        let mailboxes = match result {
+            Ok(mailboxes) => mailboxes,
+            Err(error) => {
+                // The stream may be mid-response after a timeout. Never reuse it.
+                guard.take();
+                return Err(error);
+            }
+        };
 
         let mut folders: Vec<Folder> = mailboxes
             .into_iter()
@@ -2340,6 +2387,23 @@ mod tls_config_tests {
         assert!(matches!(error, pebble_core::PebbleError::Network(_)));
         assert!(error.to_string().contains("LIST"));
         provider.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_partial_list_cannot_supply_a_delete_destination() {
+        let server =
+            crate::test_imap::Server::start(crate::test_imap::Behavior::PartialListDenied).await;
+        let provider = super::ImapProvider::new(server.config());
+        provider.connect().await.unwrap();
+        let store = trash_test_store();
+        let error = provider
+            .ensure_trash_folder(&store, "trash-test")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, pebble_core::PebbleError::Network(_)));
+        assert!(store.list_folders("trash-test").unwrap().is_empty());
+        assert!(provider.session.lock().await.is_none());
+        assert_eq!(server.command_count("UID"), 0);
     }
 
     #[tokio::test]
