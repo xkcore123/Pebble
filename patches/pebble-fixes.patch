@@ -1,0 +1,1867 @@
+diff --git a/crates/pebble-mail/src/imap.rs b/crates/pebble-mail/src/imap.rs
+index 33cf649d080ef36934c3b1115551e138f47502d9..14148919c96d85840b1dc99b2aebd7b5b56e60f3 100644
+--- a/crates/pebble-mail/src/imap.rs
++++ b/crates/pebble-mail/src/imap.rs
+@@ -330,11 +330,22 @@ type ImapSession = async_imap::Session<PrefixedStream<InnerStream>>;
+ 
+ const IMAP_CONNECT_TIMEOUT_SECS: u64 = 15;
+ const IMAP_COMMAND_TIMEOUT_SECS: u64 = 45;
++const IMAP_CLEANUP_TIMEOUT_SECS: u64 = 5;
+ 
+ fn imap_timeout_error(operation: &str, seconds: u64) -> PebbleError {
+     PebbleError::Network(format!("{operation} timed out after {seconds}s"))
+ }
+ 
++fn imap_login_error(error: async_imap::error::Error) -> PebbleError {
++    let message = format!("IMAP login failed: {error}");
++    match error {
++        async_imap::error::Error::Io(_) | async_imap::error::Error::ConnectionLost => {
++            PebbleError::Network(message)
++        }
++        _ => PebbleError::Auth(message),
++    }
++}
++
+ async fn with_imap_timeout<T, E, Fut>(operation: &str, seconds: u64, future: Fut) -> Result<T>
+ where
+     E: Display,
+@@ -734,7 +745,7 @@ impl ImapProvider {
+         )
+         .await
+         .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
+-        .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))
++        .map_err(|(e, _)| imap_login_error(e))
+     }
+ 
+     /// Establish a TCP connection, optionally through a SOCKS5 proxy.
+@@ -832,7 +843,7 @@ impl ImapProvider {
+                 )
+                 .await
+                 .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
+-                .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))?
++                .map_err(|(e, _)| imap_login_error(e))?
+             }
+             ConnectionSecurity::StartTls => {
+                 // Connect plain, read greeting, optionally send ID, STARTTLS, upgrade TLS.
+@@ -872,7 +883,7 @@ impl ImapProvider {
+                 )
+                 .await
+                 .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
+-                .map_err(|(e, _)| PebbleError::Auth(format!("IMAP login failed: {e}")))?
++                .map_err(|(e, _)| imap_login_error(e))?
+             }
+         };
+ 
+@@ -1205,29 +1216,87 @@ impl ImapProvider {
+ 
+     /// List folders for the given account, returning `Folder` structs.
+     pub async fn list_folders(&self, account_id: &str) -> Result<Vec<Folder>> {
++        self.list_folders_with_timeout(account_id, IMAP_COMMAND_TIMEOUT_SECS)
++            .await
++    }
++
++    async fn list_folders_with_timeout(
++        &self,
++        account_id: &str,
++        seconds: u64,
++    ) -> Result<Vec<Folder>> {
+         let mut guard = self.session.lock().await;
+         let sess = guard
+             .as_mut()
+             .ok_or_else(|| PebbleError::Network("Not connected".to_string()))?;
+ 
+-        let mailboxes: Vec<(String, Vec<NameAttribute<'static>>)> = {
+-            let stream = sess
+-                .list(None, Some("*"))
++        // async-imap 0.10's LIST stream drops tagged NO/BAD completions.
++        // Read parsed responses directly so a rejected/truncated LIST cannot
++        // masquerade as an empty mailbox list or a successful partial result.
++        let result = with_imap_timeout("LIST", seconds, async {
++            use async_imap::imap_proto::{MailboxDatum, Response, Status};
++            let tag = sess
++                .run_command("LIST \"\" \"*\"")
+                 .await
+-                .map_err(|e| PebbleError::Network(format!("LIST failed: {e}")))?;
+-            stream
+-                .map_ok(|n| {
+-                    let attributes = n
+-                        .attributes()
+-                        .iter()
+-                        .cloned()
+-                        .map(NameAttribute::into_owned)
+-                        .collect();
+-                    (n.name().to_string(), attributes)
+-                })
+-                .try_collect()
+-                .await
+-                .map_err(|e| PebbleError::Network(format!("LIST collect: {e}")))?
++                .map_err(|e| PebbleError::Network(e.to_string()))?;
++            let mut mailboxes: Vec<(String, Vec<NameAttribute<'static>>)> = Vec::new();
++            loop {
++                let response = sess
++                    .read_response()
++                    .await
++                    .ok_or_else(|| PebbleError::Network("Connection lost during LIST".into()))?
++                    .map_err(|e| PebbleError::Network(e.to_string()))?;
++                match response.parsed() {
++                    Response::MailboxData(MailboxDatum::List {
++                        name,
++                        name_attributes,
++                        ..
++                    }) => {
++                        mailboxes.push((
++                            name.to_string(),
++                            name_attributes
++                                .iter()
++                                .cloned()
++                                .map(NameAttribute::into_owned)
++                                .collect(),
++                        ));
++                    }
++                    Response::Done {
++                        tag: completed,
++                        status,
++                        information,
++                        ..
++                    } if *completed == tag => {
++                        return if *status == Status::Ok {
++                            Ok(mailboxes)
++                        } else {
++                            Err(PebbleError::Network(format!(
++                                "LIST rejected: {:?}: {}",
++                                status,
++                                information.as_deref().unwrap_or("No server details")
++                            )))
++                        };
++                    }
++                    Response::Data {
++                        status: Status::Bye,
++                        ..
++                    } => {
++                        return Err(PebbleError::Network("Server sent BYE during LIST".into()));
++                    }
++                    // Folder discovery does not consume mailbox updates; the
++                    // sync worker reconciles mailbox contents separately.
++                    _ => {}
++                }
++            }
++        })
++        .await;
++        let mailboxes = match result {
++            Ok(mailboxes) => mailboxes,
++            Err(error) => {
++                // The stream may be mid-response after a timeout. Never reuse it.
++                guard.take();
++                return Err(error);
++            }
+         };
+ 
+         let mut folders: Vec<Folder> = mailboxes
+@@ -1259,6 +1328,34 @@ impl ImapProvider {
+         Ok(folders)
+     }
+ 
++    /// Deletion must not depend on whether Trash was selected for synchronization.
++    /// Discover it on the server if needed, retaining the persisted folder ID.
++    /// Never substitute permanent deletion or create an arbitrary remote mailbox.
++    pub async fn ensure_trash_folder(
++        &self,
++        store: &pebble_store::Store,
++        account_id: &str,
++    ) -> Result<Folder> {
++        if let Some(folder) = store.find_folder_by_role(account_id, FolderRole::Trash)? {
++            if !folder.remote_id.starts_with("__local_") {
++                return Ok(folder);
++            }
++        }
++        let mut folder = self
++            .list_folders(account_id)
++            .await?
++            .into_iter()
++            .find(|folder| folder.role == Some(FolderRole::Trash))
++            .ok_or_else(|| {
++                PebbleError::Validation(
++                    "No Trash folder found locally or on the IMAP server; messages were not deleted"
++                        .into(),
++                )
++            })?;
++        folder.id = store.insert_folder(&folder)?;
++        Ok(folder)
++    }
++
+     /// Fetch raw message bytes from a mailbox.
+     /// Returns a list of `(uid, raw_bytes)` pairs.
+     pub async fn fetch_messages_raw(
+@@ -2067,22 +2164,9 @@ impl ImapProvider {
+         }
+ 
+         let mut idle_handle = session.idle();
+-        if let Err(e) =
+-            with_imap_timeout("IDLE init", IMAP_COMMAND_TIMEOUT_SECS, idle_handle.init()).await
+-        {
+-            // init() failed; the handle still owns the session.
+-            // Call done() to recover the session.
+-            match idle_handle.done().await {
+-                Ok(recovered) => {
+-                    let mut guard = self.session.lock().await;
+-                    *guard = Some(recovered);
+-                }
+-                Err(_) => {
+-                    // Session is lost; caller will need to reconnect.
+-                }
+-            }
+-            return Err(e);
+-        }
++        // A failed/timed-out IDLE init leaves protocol state uncertain.
++        // Drop the session instead of waiting indefinitely for DONE.
++        with_imap_timeout("IDLE init", IMAP_COMMAND_TIMEOUT_SECS, idle_handle.init()).await?;
+ 
+         let (wait_fut, _stop_source) = idle_handle.wait_with_timeout(timeout_dur);
+         let idle_result = wait_fut.await;
+@@ -2100,14 +2184,15 @@ impl ImapProvider {
+             Err(e) => super::idle::IdleEvent::Error(format!("IDLE wait error: {e}")),
+         };
+ 
+-        match idle_handle.done().await {
++        match with_imap_timeout("IDLE DONE", IMAP_CLEANUP_TIMEOUT_SECS, idle_handle.done()).await {
+             Ok(recovered) => {
+                 let mut guard = self.session.lock().await;
+                 *guard = Some(recovered);
+             }
+-            Err(_) => {
++            Err(e) => {
+                 // Session is lost; caller will need to reconnect.
+-                tracing::warn!("Failed to recover session after IDLE DONE");
++                tracing::warn!("Failed to recover session after IDLE DONE: {e}");
++                return Err(e);
+             }
+         }
+ 
+@@ -2117,9 +2202,11 @@ impl ImapProvider {
+     /// Disconnect from the IMAP server.
+     pub async fn disconnect(&self) -> Result<()> {
+         let mut guard = self.session.lock().await;
+-        if let Some(sess) = guard.as_mut() {
+-            let _ = sess.logout().await;
+-            *guard = None;
++        // Clear the slot before awaiting cleanup: cancellation must not leave
++        // a dead session installed, and an unresponsive peer cannot block
++        // reconnection or application shutdown indefinitely.
++        if let Some(mut sess) = guard.take() {
++            let _ = with_imap_timeout("LOGOUT", IMAP_CLEANUP_TIMEOUT_SECS, sess.logout()).await;
+         }
+         Ok(())
+     }
+@@ -2211,6 +2298,183 @@ mod tls_config_tests {
+         build_native_tls_connector, build_tls_connector, imap_timeout_error, ImapConfig, SmtpConfig,
+     };
+ 
++    fn trash_test_store() -> pebble_store::Store {
++        let store = pebble_store::Store::open_in_memory().unwrap();
++        store
++            .insert_account(&pebble_core::Account {
++                id: "trash-test".into(),
++                email: "fixture@example.invalid".into(),
++                display_name: "Fixture".into(),
++                account_label: None,
++                provider_display_name: None,
++                color: None,
++                provider: pebble_core::ProviderType::Imap,
++                created_at: 0,
++                updated_at: 0,
++            })
++            .unwrap();
++        store
++    }
++
++    #[tokio::test]
++    async fn discovers_unsynced_163_trash_and_preserves_existing_folder_id() {
++        let server =
++            crate::test_imap::Server::start(crate::test_imap::Behavior::TrashMailbox).await;
++        let provider = super::ImapProvider::new(server.config());
++        provider.connect().await.unwrap();
++        let store = trash_test_store();
++        let mut existing = provider
++            .list_folders("trash-test")
++            .await
++            .unwrap()
++            .pop()
++            .unwrap();
++        assert_eq!(existing.name, "已删除");
++        existing.id = "persisted-id".into();
++        existing.role = None;
++        store.insert_folder(&existing).unwrap();
++        let trash = provider
++            .ensure_trash_folder(&store, "trash-test")
++            .await
++            .unwrap();
++        assert_eq!(trash.id, "persisted-id");
++        assert_eq!(trash.role, Some(pebble_core::FolderRole::Trash));
++        assert_eq!(trash.remote_id, "&XfJSIJZk-");
++        let lists = server.command_count("LIST");
++        assert_eq!(
++            provider
++                .ensure_trash_folder(&store, "trash-test")
++                .await
++                .unwrap()
++                .id,
++            trash.id
++        );
++        assert_eq!(
++            server.command_count("LIST"),
++            lists,
++            "cached Trash must avoid another LIST"
++        );
++        assert_eq!(store.list_folders("trash-test").unwrap().len(), 1);
++        provider.disconnect().await.unwrap();
++    }
++
++    #[tokio::test]
++    async fn missing_server_trash_is_an_error_without_mutation() {
++        let server = crate::test_imap::Server::start(crate::test_imap::Behavior::NoTrash).await;
++        let provider = super::ImapProvider::new(server.config());
++        provider.connect().await.unwrap();
++        let store = trash_test_store();
++        let error = provider
++            .ensure_trash_folder(&store, "trash-test")
++            .await
++            .unwrap_err();
++        assert!(matches!(error, pebble_core::PebbleError::Validation(_)));
++        assert!(store.list_folders("trash-test").unwrap().is_empty());
++        assert_eq!(server.command_count("UID"), 0);
++        assert_eq!(server.command_count("EXPUNGE"), 0);
++        provider.disconnect().await.unwrap();
++    }
++
++    #[tokio::test]
++    async fn list_failure_is_not_misreported_as_missing_trash() {
++        let server = crate::test_imap::Server::start(crate::test_imap::Behavior::ListDenied).await;
++        let provider = super::ImapProvider::new(server.config());
++        provider.connect().await.unwrap();
++        let error = provider
++            .ensure_trash_folder(&trash_test_store(), "trash-test")
++            .await
++            .unwrap_err();
++        assert!(matches!(error, pebble_core::PebbleError::Network(_)));
++        assert!(error.to_string().contains("LIST"));
++        provider.disconnect().await.unwrap();
++    }
++
++    #[tokio::test]
++    async fn rejected_partial_list_cannot_supply_a_delete_destination() {
++        let server =
++            crate::test_imap::Server::start(crate::test_imap::Behavior::PartialListDenied).await;
++        let provider = super::ImapProvider::new(server.config());
++        provider.connect().await.unwrap();
++        let store = trash_test_store();
++        let error = provider
++            .ensure_trash_folder(&store, "trash-test")
++            .await
++            .unwrap_err();
++        assert!(matches!(error, pebble_core::PebbleError::Network(_)));
++        assert!(store.list_folders("trash-test").unwrap().is_empty());
++        assert!(provider.session.lock().await.is_none());
++        assert_eq!(server.command_count("UID"), 0);
++    }
++
++    #[tokio::test]
++    async fn list_and_stream_collection_have_a_bounded_timeout() {
++        for behavior in [
++            crate::test_imap::Behavior::SilentList,
++            crate::test_imap::Behavior::SilentListCollect,
++        ] {
++            let server = crate::test_imap::Server::start(behavior).await;
++            let provider = super::ImapProvider::new(server.config());
++            provider.connect().await.unwrap();
++            let error = tokio::time::timeout(
++                std::time::Duration::from_secs(3),
++                provider.list_folders_with_timeout("trash-test", 1),
++            )
++            .await
++            .expect("LIST including stream collection must be bounded")
++            .unwrap_err();
++            assert!(error.to_string().contains("LIST timed out"));
++        }
++    }
++
++    #[test]
++    fn login_transport_failure_is_not_misreported_as_bad_credentials() {
++        let error =
++            async_imap::error::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
++        assert!(matches!(
++            super::imap_login_error(error),
++            pebble_core::PebbleError::Network(_)
++        ));
++        assert!(matches!(
++            super::imap_login_error(async_imap::error::Error::ConnectionLost),
++            pebble_core::PebbleError::Network(_)
++        ));
++        assert!(matches!(
++            super::imap_login_error(async_imap::error::Error::No("Invalid credentials".into())),
++            pebble_core::PebbleError::Auth(_)
++        ));
++    }
++
++    #[tokio::test]
++    async fn unresponsive_logout_is_bounded_and_clears_session() {
++        let server =
++            crate::test_imap::Server::start(crate::test_imap::Behavior::SilentLogout).await;
++        let provider = super::ImapProvider::new(server.config());
++        provider.connect().await.unwrap();
++        tokio::time::timeout(std::time::Duration::from_secs(10), provider.disconnect())
++            .await
++            .expect("LOGOUT must not block reconnection forever")
++            .unwrap();
++        assert!(provider.session.lock().await.is_none());
++    }
++
++    #[tokio::test]
++    async fn unresponsive_idle_done_reports_failure_not_timeout_success() {
++        let server = crate::test_imap::Server::start(crate::test_imap::Behavior::SilentDone).await;
++        let provider = super::ImapProvider::new(server.config());
++        provider.connect().await.unwrap();
++        let result = tokio::time::timeout(
++            std::time::Duration::from_secs(10),
++            provider.idle_wait("INBOX", std::time::Duration::from_millis(10)),
++        )
++        .await
++        .expect("IDLE DONE must not hang");
++        assert!(
++            result.is_err(),
++            "failed DONE must trigger watcher reconnect"
++        );
++        assert!(provider.session.lock().await.is_none());
++    }
++
+     #[test]
+     fn build_tls_connector_returns_result() {
+         assert!(build_tls_connector(false).is_ok());
+diff --git a/crates/pebble-mail/src/lib.rs b/crates/pebble-mail/src/lib.rs
+index 83304f69010447d4568a8492ec989f84a747ef66..2a11c9ea968430b49517898d64bd8b10843a5d8e 100644
+--- a/crates/pebble-mail/src/lib.rs
++++ b/crates/pebble-mail/src/lib.rs
+@@ -14,6 +14,9 @@ pub mod smtp;
+ pub mod sync;
+ pub mod thread;
+ 
++#[cfg(test)]
++mod test_imap;
++
+ pub use gmail_sync::GmailSyncWorker;
+ pub use imap::{ConnectionSecurity, ImapConfig, ImapProvider, ProxyConfig, SmtpConfig};
+ pub use outlook_sync::OutlookSyncWorker;
+diff --git a/crates/pebble-mail/src/sync.rs b/crates/pebble-mail/src/sync.rs
+index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f654bc40b 100644
+--- a/crates/pebble-mail/src/sync.rs
++++ b/crates/pebble-mail/src/sync.rs
+@@ -533,12 +533,17 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
+     };
+     let lower = message.to_ascii_lowercase();
+ 
++    // Windows localizes the message text, so recognize Winsock error codes
++    // even when the English connection-aborted/reset wording is absent.
+     lower.contains("os error 10053")
++        || lower.contains("os error 10054")
+         || lower.contains("connection reset")
+         || lower.contains("connection aborted")
+         || lower.contains("broken pipe")
+         || lower.contains("connection closed")
++        || lower.contains("connection lost")
+         || lower.contains("closed connection")
++        || lower.contains("status: bye")
+         || lower.contains("tls close_notify")
+         || lower.contains("unexpected eof")
+         || lower.contains("unexpected-eof")
+@@ -1712,19 +1717,19 @@ impl SyncWorker {
+             return Ok(());
+         }
+ 
+-        let mut first_recovered_error = None;
++        let mut first_error = None;
+         for folder in folders
+             .iter()
+             .filter(|folder| should_poll_imap_folder_for_scope(folder, scope))
+         {
+             if let Some(e) = self.poll_imap_folder_with_reconnect(folder).await {
+-                if first_recovered_error.is_none() {
+-                    first_recovered_error = Some(e);
++                if first_error.is_none() {
++                    first_error = Some(e);
+                 }
+             }
+         }
+ 
+-        if let Some(e) = first_recovered_error {
++        if let Some(e) = first_error {
+             return Err(e);
+         }
+ 
+@@ -1737,7 +1742,10 @@ impl SyncWorker {
+     ) -> Option<PebbleError> {
+         match self.poll_imap_folder_once(folder).await {
+             Ok(()) => None,
+-            Err(e) if is_missing_imap_mailbox_error(&e) => {
++            Err(e)
++                if is_missing_imap_mailbox_error(&e)
++                    && folder.role != Some(pebble_core::FolderRole::Inbox) =>
++            {
+                 debug!(
+                     "Skipping unavailable IMAP folder {} ({}) for account {}: {}",
+                     folder.name, folder.remote_id, self.base.account_id, e
+@@ -1764,9 +1772,7 @@ impl SyncWorker {
+                                     folder.name, retry_error
+                                 ),
+                             );
+-                            if is_retryable_imap_connection_error(&retry_error) {
+-                                return Some(retry_error);
+-                            }
++                            return Some(retry_error);
+                         }
+                         None
+                     }
+@@ -1788,7 +1794,7 @@ impl SyncWorker {
+                     "poll",
+                     &format!("Poll failed for folder {}: {}", folder.name, e),
+                 );
+-                None
++                Some(e)
+             }
+         }
+     }
+@@ -1847,7 +1853,10 @@ impl SyncWorker {
+     async fn reconcile_folder(&self, folder: &pebble_core::Folder) -> Result<()> {
+         match self.reconcile_folder_once(folder).await {
+             Ok(()) => Ok(()),
+-            Err(e) if is_missing_imap_mailbox_error(&e) => {
++            Err(e)
++                if is_missing_imap_mailbox_error(&e)
++                    && folder.role != Some(pebble_core::FolderRole::Inbox) =>
++            {
+                 debug!(
+                     "Skipping unavailable IMAP folder {} ({}) during reconcile for account {}: {}",
+                     folder.name, folder.remote_id, self.base.account_id, e
+@@ -2036,21 +2045,9 @@ impl SyncWorker {
+                     break;
+                 }
+ 
+-                if backoff.is_circuit_open() {
+-                    let delay = backoff.current_delay();
+-                    warn!(
+-                        "IMAP IDLE watcher circuit open for account {} ({} failures), waiting {:?}",
+-                        account_id,
+-                        backoff.failure_count(),
+-                        delay
+-                    );
+-                    match tokio::time::timeout(delay, stop_rx.changed()).await {
+-                        Ok(Ok(())) if *stop_rx.borrow() => break,
+-                        _ => {}
+-                    }
+-                    continue;
+-                }
+-
++                // Failure branches already wait with capped backoff. Always
++                // attempt the next connection afterwards; continuing merely
++                // because the circuit is open would prevent recovery forever.
+                 if !connected {
+                     match idle_provider.connect().await {
+                         Ok(()) => {
+@@ -2122,21 +2119,59 @@ impl SyncWorker {
+         })
+     }
+ 
++    async fn connect_for_sync(&self, config: &SyncConfig) -> bool {
++        let mut stop_rx = self.stop_rx.clone();
++        let mut backoff = SyncBackoff::new();
++        loop {
++            if *stop_rx.borrow() {
++                return false;
++            }
++            let result = tokio::select! {
++                result = self.provider.connect() => result,
++                changed = stop_rx.changed() => {
++                    if changed.is_err() || *stop_rx.borrow() {
++                        return false;
++                    }
++                    continue;
++                }
++            };
++            match result {
++                Ok(()) => return true,
++                Err(e) => {
++                    warn!(
++                        "Failed to connect for account {}: {}",
++                        self.base.account_id, e
++                    );
++                    self.base
++                        .emit_error("connection", &format!("Failed to connect: {e}"));
++                    self.base.emit_sync_error("connection", &e.to_string());
++                    if config.manual_only() || !matches!(e, PebbleError::Network(_)) {
++                        return false;
++                    }
++                    let delay = backoff.record_failure();
++                    tokio::select! {
++                        _ = tokio::time::sleep(delay) => {}
++                        changed = stop_rx.changed() => {
++                            if changed.is_err() || *stop_rx.borrow() {
++                                return false;
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++
+     /// Run the sync worker loop until the stop signal is received.
+     pub async fn run(
+         &self,
+         config: SyncConfig,
+         trigger_rx: Option<mpsc::UnboundedReceiver<SyncTrigger>>,
+     ) {
+-        // Connect and do initial sync
+-        if let Err(e) = self.provider.connect().await {
+-            error!(
+-                "Failed to connect for account {}: {}",
+-                self.base.account_id, e
+-            );
+-            self.base
+-                .emit_error("connection", &format!("Failed to connect: {}", e));
+-            self.base.emit_sync_error("connection", &e.to_string());
++        // A transient startup outage must not permanently terminate a
++        // background worker. Manual runs and rejected credentials still fail
++        // promptly instead of retrying indefinitely.
++        if !self.connect_for_sync(&config).await {
+             return;
+         }
+ 
+@@ -2495,6 +2530,160 @@ mod tests {
+     use pebble_core::{Folder, FolderRole};
+     use std::io::{self, Write};
+ 
++    async fn poll_against_fixture(
++        behavior: crate::test_imap::Behavior,
++    ) -> (Result<()>, Vec<String>, usize) {
++        let server = crate::test_imap::Server::start(behavior).await;
++        let provider = Arc::new(ImapMailProvider::new(server.config()));
++        provider.connect().await.unwrap();
++        let store = test_store_with_message("recovery-message");
++        let (_stop_tx, stop_rx) = watch::channel(false);
++        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
++        let worker = SyncWorker::new("account-1", provider, store, stop_rx, std::env::temp_dir())
++            .with_progress_tx(progress_tx);
++        let result = tokio::time::timeout(Duration::from_secs(10), worker.poll_new_messages())
++            .await
++            .expect("poll must not hang");
++        let mut statuses = Vec::new();
++        while let Ok(progress) = progress_rx.try_recv() {
++            statuses.push(progress.status);
++        }
++        (result, statuses, server.login_count())
++    }
++
++    #[tokio::test]
++    async fn denied_imap_poll_reports_error_not_success() {
++        let (result, statuses, logins) =
++            poll_against_fixture(crate::test_imap::Behavior::SelectDenied).await;
++        assert!(result.is_err());
++        assert_eq!(statuses, ["started", "error"]);
++        assert_eq!(logins, 1, "permission errors must not trigger reconnects");
++    }
++
++    #[tokio::test]
++    async fn missing_inbox_is_not_silently_skipped_during_poll() {
++        let (result, statuses, _) =
++            poll_against_fixture(crate::test_imap::Behavior::MissingInbox).await;
++        assert!(result.is_err());
++        assert_eq!(statuses, ["started", "error"]);
++    }
++
++    #[tokio::test]
++    async fn imap_bye_reconnects_and_completes_poll() {
++        let (result, statuses, logins) =
++            poll_against_fixture(crate::test_imap::Behavior::ByeThenEmpty).await;
++        assert!(result.is_ok(), "{result:?}");
++        assert_eq!(statuses, ["started", "completed"]);
++        assert_eq!(logins, 2);
++    }
++
++    #[tokio::test]
++    async fn denied_poll_after_reconnect_still_reports_error() {
++        let (result, statuses, logins) =
++            poll_against_fixture(crate::test_imap::Behavior::ByeThenDenied).await;
++        assert!(result.is_err());
++        assert_eq!(statuses, ["started", "error"]);
++        assert_eq!(logins, 2, "retry must be bounded");
++    }
++
++    #[tokio::test]
++    async fn background_startup_recovers_from_transient_login_disconnect() {
++        let server =
++            crate::test_imap::Server::start(crate::test_imap::Behavior::DropFirstLogin).await;
++        let provider = Arc::new(ImapMailProvider::new(server.config()));
++        let (_stop_tx, stop_rx) = watch::channel(false);
++        let worker = SyncWorker::new(
++            "account-1",
++            provider,
++            test_store_with_message("startup"),
++            stop_rx,
++            std::env::temp_dir(),
++        );
++        let connected = tokio::time::timeout(
++            Duration::from_secs(25),
++            worker.connect_for_sync(&SyncConfig::default()),
++        )
++        .await
++        .expect("startup should recover after backoff");
++        assert!(connected);
++        assert_eq!(server.login_count(), 2);
++    }
++
++    #[tokio::test]
++    async fn manual_startup_does_not_retry_failed_login() {
++        let server =
++            crate::test_imap::Server::start(crate::test_imap::Behavior::DropFirstLogin).await;
++        let provider = Arc::new(ImapMailProvider::new(server.config()));
++        let (_stop_tx, stop_rx) = watch::channel(false);
++        let worker = SyncWorker::new(
++            "account-1",
++            provider,
++            test_store_with_message("manual"),
++            stop_rx,
++            std::env::temp_dir(),
++        );
++        let config = SyncConfig {
++            poll_interval_secs: 0,
++            ..Default::default()
++        };
++        assert!(
++            !tokio::time::timeout(Duration::from_secs(3), worker.connect_for_sync(&config))
++                .await
++                .unwrap()
++        );
++        assert_eq!(server.login_count(), 1);
++    }
++
++    #[tokio::test]
++    async fn background_startup_does_not_retry_rejected_credentials() {
++        let server = crate::test_imap::Server::start(crate::test_imap::Behavior::RejectLogin).await;
++        let provider = Arc::new(ImapMailProvider::new(server.config()));
++        let (_stop_tx, stop_rx) = watch::channel(false);
++        let worker = SyncWorker::new(
++            "account-1",
++            provider,
++            test_store_with_message("auth"),
++            stop_rx,
++            std::env::temp_dir(),
++        );
++        assert!(!tokio::time::timeout(
++            Duration::from_secs(3),
++            worker.connect_for_sync(&SyncConfig::default())
++        )
++        .await
++        .unwrap());
++        assert_eq!(server.login_count(), 1);
++    }
++
++    #[tokio::test]
++    async fn background_startup_backoff_can_be_stopped() {
++        let server =
++            crate::test_imap::Server::start(crate::test_imap::Behavior::DropFirstLogin).await;
++        let provider = Arc::new(ImapMailProvider::new(server.config()));
++        let (stop_tx, stop_rx) = watch::channel(false);
++        let (error_tx, mut error_rx) = mpsc::unbounded_channel();
++        let worker = SyncWorker::new(
++            "account-1",
++            provider,
++            test_store_with_message("stop"),
++            stop_rx,
++            std::env::temp_dir(),
++        )
++        .with_error_tx(error_tx);
++        let task =
++            tokio::spawn(async move { worker.connect_for_sync(&SyncConfig::default()).await });
++        tokio::time::timeout(Duration::from_secs(3), error_rx.recv())
++            .await
++            .unwrap()
++            .unwrap();
++        stop_tx.send(true).unwrap();
++        assert!(!tokio::time::timeout(Duration::from_secs(1), task)
++            .await
++            .unwrap()
++            .unwrap());
++        assert_eq!(server.login_count(), 1);
++    }
++
+     struct FailingAttachmentWriter {
+         fail_write: bool,
+         fail_flush: bool,
+@@ -3227,6 +3416,32 @@ mod tests {
+         assert!(is_retryable_imap_connection_error(&error));
+     }
+ 
++    #[test]
++    fn imap_windows_connection_reset_is_retryable_for_polling() {
++        let error = pebble_core::PebbleError::Network(
++            "SELECT failed: io: 远程主机强迫关闭了一个现有的连接。 (os error 10054)".to_string(),
++        );
++
++        assert!(is_retryable_imap_connection_error(&error));
++    }
++
++    #[test]
++    fn imap_native_windows_connection_reset_is_retryable_for_polling() {
++        let error = pebble_core::PebbleError::Network(format!(
++            "SELECT failed: io: {}",
++            std::io::Error::from_raw_os_error(10054)
++        ));
++
++        assert!(is_retryable_imap_connection_error(&error));
++    }
++
++    #[test]
++    fn imap_authentication_failure_is_not_retryable_as_connection_error() {
++        let error = pebble_core::PebbleError::Auth("Invalid credentials".to_string());
++
++        assert!(!is_retryable_imap_connection_error(&error));
++    }
++
+     #[test]
+     fn imap_rustls_unexpected_eof_is_retryable_for_polling() {
+         let error = pebble_core::PebbleError::Network(
+diff --git a/crates/pebble-mail/src/test_imap.rs b/crates/pebble-mail/src/test_imap.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6d9b8c26cecc03ccc8060f17bb497bc848923f5
+--- /dev/null
++++ b/crates/pebble-mail/src/test_imap.rs
+@@ -0,0 +1,174 @@
++// Local, credential-free IMAP fixtures for connection and deletion regressions.
++use std::sync::{Arc, Mutex};
++
++use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
++use tokio::net::TcpListener;
++use tokio::task::{JoinHandle, JoinSet};
++
++use super::imap::{ConnectionSecurity, ImapConfig};
++
++#[derive(Clone, Copy)]
++pub(crate) enum Behavior {
++    SelectDenied,
++    MissingInbox,
++    ByeThenEmpty,
++    ByeThenDenied,
++    SilentDone,
++    SilentLogout,
++    DropFirstLogin,
++    RejectLogin,
++    TrashMailbox,
++    NoTrash,
++    ListDenied,
++    PartialListDenied,
++    SilentList,
++    SilentListCollect,
++}
++
++pub(crate) struct Server {
++    port: u16,
++    commands: Arc<Mutex<Vec<String>>>,
++    task: JoinHandle<()>,
++}
++
++impl Drop for Server {
++    fn drop(&mut self) {
++        self.task.abort();
++    }
++}
++
++impl Server {
++    pub(crate) async fn start(behavior: Behavior) -> Self {
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let port = listener.local_addr().unwrap().port();
++        let commands = Arc::new(Mutex::new(Vec::new()));
++        let recorded = Arc::clone(&commands);
++        let task = tokio::spawn(async move {
++            let mut clients = JoinSet::new();
++            let mut connection = 0;
++            loop {
++                let (socket, _) = listener.accept().await.unwrap();
++                let index = connection;
++                connection += 1;
++                let recorded = Arc::clone(&recorded);
++                clients.spawn(async move {
++                    let mut stream = BufReader::new(socket);
++                    stream.get_mut().write_all(b"* OK Test IMAP ready\r\n").await.unwrap();
++                    let mut idle_tag = String::new();
++                    let mut selected = String::new();
++                    let mut moved = false;
++                    loop {
++                        let mut line = String::new();
++                        if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
++                            break;
++                        }
++                        let mut words = line.split_whitespace();
++                        let tag = words.next().unwrap().to_string();
++                        let command = words.next().unwrap_or("").to_ascii_uppercase();
++                        // Never record LOGIN arguments, even in test fixtures.
++                        recorded.lock().unwrap().push(command.clone());
++                        let reply = if tag == "DONE" {
++                            if matches!(behavior, Behavior::SilentDone) {
++                                std::future::pending::<()>().await;
++                            }
++                            format!("{idle_tag} OK IDLE completed\r\n")
++                        } else if command == "LOGIN" {
++                            if matches!(behavior, Behavior::DropFirstLogin) && index == 0 {
++                                break;
++                            }
++                            if matches!(behavior, Behavior::RejectLogin) {
++                                stream.get_mut().write_all(format!("{tag} NO Invalid credentials\r\n").as_bytes()).await.unwrap();
++                                break;
++                            }
++                            format!("{tag} OK LOGIN completed\r\n")
++                        } else if command == "LIST" {
++                            match behavior {
++                                Behavior::SilentList => std::future::pending::<String>().await,
++                                Behavior::SilentListCollect => {
++                                    stream.get_mut().write_all(b"* LIST () \"/\" \"INBOX\"\r\n").await.unwrap();
++                                    std::future::pending::<String>().await
++                                }
++                                Behavior::PartialListDenied => format!("* LIST (\\Trash) \"/\" \"Trash\"\r\n{tag} NO LIST denied\r\n"),
++                                Behavior::ListDenied => format!("{tag} NO LIST denied\r\n"),
++                                Behavior::TrashMailbox => format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"&XfJSIJZk-\"\r\n{tag} OK LIST completed\r\n"),
++                                _ => format!("* LIST () \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n"),
++                            }
++                        } else if command == "SELECT" {
++                            selected = words.next().unwrap_or("").trim_matches('"').to_string();
++                            match behavior {
++                                Behavior::ByeThenEmpty | Behavior::ByeThenDenied if index == 0 => {
++                                    stream.get_mut().write_all(b"* BYE problems with connection\r\n").await.unwrap();
++                                    break;
++                                }
++                                Behavior::SelectDenied | Behavior::ByeThenDenied => {
++                                    format!("{tag} NO [NOPERM] Permission denied\r\n")
++                                }
++                                Behavior::MissingInbox => format!("{tag} NO SELECT Folder not exist\r\n"),
++                                _ => format!("* FLAGS (\\Seen)\r\n* 0 EXISTS\r\n* OK [UIDVALIDITY 42] UIDs valid\r\n* OK [UIDNEXT 1] Next UID\r\n{tag} OK [READ-WRITE] SELECT completed\r\n"),
++                            }
++                        } else if command == "UID" {
++                            match words.next().unwrap_or("").to_ascii_uppercase().as_str() {
++                                "SEARCH" => {
++                                    let uid = if selected == "&XfJSIJZk-" && moved {
++                                        " 42"
++                                    } else if selected == "INBOX" && !moved {
++                                        " 7"
++                                    } else { "" };
++                                    format!("* SEARCH{uid}\r\n{tag} OK SEARCH completed\r\n")
++                                }
++                                "MOVE" => {
++                                    moved = true;
++                                    format!("{tag} OK MOVE completed\r\n")
++                                }
++                                _ => format!("{tag} OK completed\r\n"),
++                            }
++                        } else if command == "IDLE" {
++                            idle_tag = tag;
++                            "+ idling\r\n".to_string()
++                        } else if command == "LOGOUT" {
++                            if matches!(behavior, Behavior::SilentLogout) {
++                                std::future::pending::<()>().await;
++                            }
++                            format!("* BYE logging out\r\n{tag} OK LOGOUT completed\r\n")
++                        } else {
++                            format!("{tag} OK completed\r\n")
++                        };
++                        if stream.get_mut().write_all(reply.as_bytes()).await.is_err() {
++                            break;
++                        }
++                    }
++                });
++            }
++        });
++        Self {
++            port,
++            commands,
++            task,
++        }
++    }
++
++    pub(crate) fn config(&self) -> ImapConfig {
++        ImapConfig {
++            host: "127.0.0.1".to_string(),
++            port: self.port,
++            username: "fixture-user".to_string(),
++            password: "fixture-password".to_string(),
++            security: ConnectionSecurity::Plain,
++            accept_invalid_certs: false,
++            proxy: None,
++        }
++    }
++
++    pub(crate) fn login_count(&self) -> usize {
++        self.command_count("LOGIN")
++    }
++
++    pub(crate) fn command_count(&self, command: &str) -> usize {
++        self.commands
++            .lock()
++            .unwrap()
++            .iter()
++            .filter(|cmd| cmd.as_str() == command)
++            .count()
++    }
++}
+diff --git a/src-tauri/src/commands/batch.rs b/src-tauri/src/commands/batch.rs
+index ceefc26fa2f6f834a6f0d20c3ba8c7284e9078b5..f39a826fb6c922a1472c6c3e4766d135334aca1f 100644
+--- a/src-tauri/src/commands/batch.rs
++++ b/src-tauri/src/commands/batch.rs
+@@ -327,6 +327,66 @@ pub async fn batch_archive(
+     Ok(success_count)
+ }
+ 
++/// Resolve Trash before mutating anything. A MOVE is not a soft-delete: its
++/// destination UID and visible Trash membership must be persisted together.
++async fn delete_imap_message(
++    state: &AppState,
++    imap: &pebble_mail::ImapProvider,
++    msg: &Message,
++) -> Result<(), PebbleError> {
++    let source = find_message_folder(state, &msg.id, &msg.account_id)?;
++    let permanent = source.role == Some(FolderRole::Trash);
++    let trash = if permanent {
++        None
++    } else {
++        Some(
++            imap.ensure_trash_folder(&state.store, &msg.account_id)
++                .await?,
++        )
++    };
++    let result = if source.remote_id.starts_with("__local_") {
++        Ok(())
++    } else {
++        let uid = parse_imap_uid(&msg.remote_id)?;
++        if let Some(trash) = &trash {
++            imap_move_tracked(state, imap, msg, &source.remote_id, uid, &trash.remote_id).await
++        } else {
++            super::messages::classify_remote_delete_result(
++                imap.delete_message(&source.remote_id, uid).await,
++                true,
++            )
++        }
++    };
++    if let Err(error) = result {
++        queue_batch_pending_op(
++            state,
++            msg,
++            if permanent {
++                "delete_permanent"
++            } else {
++                "delete"
++            },
++            json!({
++                "source_folder_id": source.id,
++                "source_folder_remote_id": source.remote_id,
++                "trash_folder_id": trash.as_ref().map(|f| &f.id),
++                "trash_folder_remote_id": trash.as_ref().map(|f| &f.remote_id),
++                "permanent": permanent,
++            }),
++            &error.to_string(),
++        )?;
++        return Err(error);
++    }
++    if let Some(trash) = trash {
++        state.store.move_message_to_folder(&msg.id, &trash.id)?;
++    } else {
++        state
++            .store
++            .hard_delete_messages(std::slice::from_ref(&msg.id))?;
++    }
++    Ok(())
++}
++
+ #[tauri::command]
+ pub async fn batch_delete(
+     state: State<'_, AppState>,
+@@ -339,6 +399,8 @@ pub async fn batch_delete(
+     // Track which messages were successfully deleted remotely
+     let mut deleted_ids: Vec<String> = Vec::new();
+     let mut queued_for_local_commit_ids: Vec<String> = Vec::new();
++    let mut imap_committed_ids = Vec::new();
++    let mut delete_errors = Vec::new();
+     // Remote sync: connect once per account, operate, disconnect.
+     for (account_id, (provider_type, messages)) in &groups {
+         if matches!(provider_type, ProviderType::Pop3) {
+@@ -395,79 +457,38 @@ pub async fn batch_delete(
+                         }
+                     }
+                     ConnectedProvider::Imap(imap) => {
+-                        if let Ok(trash_folder) =
+-                            find_folder_by_role(&state, account_id, FolderRole::Trash)
+-                        {
++                        // Discover once before the batch, including when LIST fails.
++                        // Otherwise an unavailable server could stall once per message.
++                        let needs_trash = messages.iter().any(|msg| {
++                            find_message_folder(&state, &msg.id, account_id)
++                                .map(|folder| folder.role != Some(FolderRole::Trash))
++                                .unwrap_or(true)
++                        });
++                        let discovery = if needs_trash {
++                            imap.ensure_trash_folder(&state.store, account_id)
++                                .await
++                                .map(|_| ())
++                        } else {
++                            Ok(())
++                        };
++                        if let Err(error) = discovery {
++                            delete_errors.push(error.to_string());
++                        } else {
+                             for msg in messages {
+-                                if let Ok(uid) = parse_imap_uid(&msg.remote_id) {
+-                                    if let Ok(src) =
+-                                        find_message_folder(&state, &msg.id, account_id)
+-                                    {
+-                                        if src.id != trash_folder.id {
+-                                            match imap
+-                                                .move_message(
+-                                                    &src.remote_id,
+-                                                    uid,
+-                                                    &trash_folder.remote_id,
+-                                                )
+-                                                .await
+-                                            {
+-                                                Ok(_) => deleted_ids.push(msg.id.clone()),
+-                                                Err(e) => {
+-                                                    warn!(
+-                                                        "IMAP batch delete failed for {}: {e}",
+-                                                        msg.id
+-                                                    );
+-                                                    queue_batch_pending_op(
+-                                                        &state,
+-                                                        msg,
+-                                                        "delete",
+-                                                        json!({
+-                                                            "source_folder_id": src.id,
+-                                                            "source_folder_remote_id": src.remote_id,
+-                                                            "trash_folder_id": trash_folder.id,
+-                                                            "trash_folder_remote_id": trash_folder.remote_id,
+-                                                        }),
+-                                                        &e.to_string(),
+-                                                    )?;
+-                                                }
+-                                            }
+-                                        } else {
+-                                            match imap.delete_message(&src.remote_id, uid).await {
+-                                                Ok(_) => deleted_ids.push(msg.id.clone()),
+-                                                Err(e) => {
+-                                                    warn!("IMAP batch permanent delete failed for {}: {e}", msg.id);
+-                                                    queue_batch_pending_op(
+-                                                        &state,
+-                                                        msg,
+-                                                        "delete_permanent",
+-                                                        json!({
+-                                                            "source_folder_id": src.id,
+-                                                            "source_folder_remote_id": src.remote_id,
+-                                                            "permanent": true,
+-                                                        }),
+-                                                        &e.to_string(),
+-                                                    )?;
+-                                                }
+-                                            }
++                                match delete_imap_message(&state, imap, msg).await {
++                                    Ok(()) => imap_committed_ids.push(msg.id.clone()),
++                                    Err(error) => {
++                                        warn!("IMAP batch delete failed for {}: {error}", msg.id);
++                                        delete_errors.push(error.to_string());
++                                        // Stop using a failing connection rather than waiting
++                                        // for the command timeout again for every message.
++                                        if matches!(
++                                            error,
++                                            PebbleError::Validation(_) | PebbleError::Network(_)
++                                        ) {
++                                            break;
+                                         }
+-                                    } else {
+-                                        queue_batch_pending_op(
+-                                            &state,
+-                                            msg,
+-                                            "delete",
+-                                            json!({ "trash_folder_id": trash_folder.id }),
+-                                            "Source folder lookup failed",
+-                                        )?;
+                                     }
+-                                } else {
+-                                    queue_batch_pending_op(
+-                                        &state,
+-                                        msg,
+-                                        "delete",
+-                                        json!({ "trash_folder_id": trash_folder.id }),
+-                                        "Invalid IMAP UID",
+-                                    )?;
+                                 }
+                             }
+                         }
+@@ -478,14 +499,35 @@ pub async fn batch_delete(
+             Err(e) => {
+                 let error = e.to_string();
+                 for msg in messages {
++                    let source = find_message_folder(&state, &msg.id, account_id).ok();
++                    let permanent = matches!(provider_type, ProviderType::Imap)
++                        && source
++                            .as_ref()
++                            .is_some_and(|folder| folder.role == Some(FolderRole::Trash));
+                     queue_batch_pending_op(
+                         &state,
+                         msg,
+-                        "delete",
+-                        json!({ "trash": true }),
++                        if permanent {
++                            "delete_permanent"
++                        } else {
++                            "delete"
++                        },
++                        json!({
++                            "trash": !permanent,
++                            "permanent": permanent,
++                            "source_folder_id": source.as_ref().map(|folder| &folder.id),
++                            "source_folder_remote_id": source.as_ref().map(|folder| &folder.remote_id),
++                        }),
+                         &error,
+                     )?;
+-                    queued_for_local_commit_ids.push(msg.id.clone());
++                    // IMAP needs a verified Trash target and destination UID before
++                    // changing local membership. Keep offline failures visible.
++                    if !matches!(provider_type, ProviderType::Imap) {
++                        queued_for_local_commit_ids.push(msg.id.clone());
++                    }
++                }
++                if matches!(provider_type, ProviderType::Imap) {
++                    delete_errors.push(error);
+                 }
+             }
+         }
+@@ -499,7 +541,8 @@ pub async fn batch_delete(
+ 
+     // Local bulk soft-delete
+     state.store.bulk_soft_delete(&ids_to_delete)?;
+-    let success_count = ids_to_delete.len() as u32;
++    let success_count = (ids_to_delete.len() + imap_committed_ids.len()) as u32;
++    refresh_search_documents(&state, &imap_committed_ids)?;
+ 
+     // Update search index: remove deleted messages.
+     let delete_ids: Vec<String> = ids_to_delete.clone();
+@@ -519,6 +562,11 @@ pub async fn batch_delete(
+         success_count,
+         message_ids.len()
+     );
++    if success_count == 0 {
++        if let Some(error) = delete_errors.first() {
++            return Err(PebbleError::Sync(error.clone()));
++        }
++    }
+     Ok(success_count)
+ }
+ 
+@@ -822,6 +870,132 @@ mod tests {
+     use super::{batch_local_commit_ids, record_remote_success_after_remote_id_update};
+     use pebble_core::PebbleError;
+ 
++    // Reuse the same loopback-only IMAP fixture across crate boundaries.
++    mod imap {
++        pub use pebble_mail::{ConnectionSecurity, ImapConfig};
++    }
++    #[allow(dead_code)]
++    mod fixture {
++        include!("../../../crates/pebble-mail/src/test_imap.rs");
++    }
++
++    fn deletion_state() -> (crate::state::AppState, pebble_core::Message) {
++        let store = pebble_store::Store::open_in_memory().unwrap();
++        store
++            .insert_account(&pebble_core::Account {
++                id: "account".into(),
++                email: "fixture@example.invalid".into(),
++                display_name: "Fixture".into(),
++                account_label: None,
++                provider_display_name: None,
++                color: None,
++                provider: pebble_core::ProviderType::Imap,
++                created_at: 0,
++                updated_at: 0,
++            })
++            .unwrap();
++        store
++            .insert_folder(&pebble_core::Folder {
++                id: "inbox".into(),
++                account_id: "account".into(),
++                remote_id: "INBOX".into(),
++                name: "Inbox".into(),
++                folder_type: pebble_core::FolderType::Folder,
++                role: Some(pebble_core::FolderRole::Inbox),
++                parent_id: None,
++                color: None,
++                is_system: true,
++                sort_order: 0,
++            })
++            .unwrap();
++        let message: pebble_core::Message = serde_json::from_value(serde_json::json!({
++            "id": "message", "account_id": "account", "remote_id": "7",
++            "message_id_header": "<fixture@example.invalid>", "in_reply_to": null,
++            "references_header": null, "thread_id": null, "subject": "Fixture", "snippet": "",
++            "from_address": "fixture@example.invalid", "from_name": "", "to_list": [],
++            "cc_list": [], "bcc_list": [], "body_text": "", "body_html_raw": "",
++            "has_attachments": false, "is_read": false, "is_starred": false, "is_draft": false,
++            "date": 0, "remote_version": null, "is_deleted": false, "deleted_at": null,
++            "created_at": 0, "updated_at": 0,
++        }))
++        .unwrap();
++        store.insert_message(&message, &["inbox".into()]).unwrap();
++        let state = crate::state::AppState::new(
++            store,
++            pebble_search::TantivySearch::open_in_memory().unwrap(),
++            pebble_crypto::CryptoService::from_key([7; 32]),
++            std::sync::mpsc::channel().0,
++            std::env::temp_dir().join(format!("pebble-delete-test-{}", pebble_core::new_id())),
++        );
++        (state, message)
++    }
++
++    #[tokio::test]
++    async fn batch_delete_discovers_trash_and_keeps_destination_uid_visible() {
++        let server = fixture::Server::start(fixture::Behavior::TrashMailbox).await;
++        let imap = pebble_mail::ImapProvider::new(server.config());
++        imap.connect().await.unwrap();
++        let (state, message) = deletion_state();
++        super::delete_imap_message(&state, &imap, &message)
++            .await
++            .unwrap();
++        let trash = state
++            .store
++            .find_folder_by_role("account", pebble_core::FolderRole::Trash)
++            .unwrap()
++            .unwrap();
++        assert_eq!(
++            state.store.get_message_folder_ids(&message.id).unwrap(),
++            vec![trash.id]
++        );
++        let moved = state.store.get_message(&message.id).unwrap().unwrap();
++        assert_eq!(moved.remote_id, "42");
++        assert!(
++            !moved.is_deleted,
++            "moved message must remain visible and restorable in Trash"
++        );
++        assert!(state
++            .store
++            .list_pending_mail_ops("account")
++            .unwrap()
++            .is_empty());
++        assert_eq!(server.command_count("LIST"), 1);
++        assert_eq!(server.command_count("EXPUNGE"), 0);
++        imap.disconnect().await.unwrap();
++    }
++
++    #[tokio::test]
++    async fn batch_delete_without_server_trash_does_not_delete_or_queue() {
++        let server = fixture::Server::start(fixture::Behavior::NoTrash).await;
++        let imap = pebble_mail::ImapProvider::new(server.config());
++        imap.connect().await.unwrap();
++        let (state, message) = deletion_state();
++        let error = super::delete_imap_message(&state, &imap, &message)
++            .await
++            .unwrap_err();
++        assert!(matches!(error, PebbleError::Validation(_)));
++        assert_eq!(
++            state.store.get_message_folder_ids(&message.id).unwrap(),
++            vec!["inbox"]
++        );
++        assert!(
++            !state
++                .store
++                .get_message(&message.id)
++                .unwrap()
++                .unwrap()
++                .is_deleted
++        );
++        assert!(state
++            .store
++            .list_pending_mail_ops("account")
++            .unwrap()
++            .is_empty());
++        assert_eq!(server.command_count("UID"), 0);
++        assert_eq!(server.command_count("EXPUNGE"), 0);
++        imap.disconnect().await.unwrap();
++    }
++
+     #[test]
+     fn batch_local_commit_ids_include_remote_successes_and_queued_connection_failures_in_request_order(
+     ) {
+diff --git a/src-tauri/src/commands/messages/lifecycle.rs b/src-tauri/src/commands/messages/lifecycle.rs
+index b575e7b05e5c4bef4dc4646906e3fde50e4e3980..7c0f133d783ea85dc4b2751998f14238ef1628ea 100644
+--- a/src-tauri/src/commands/messages/lifecycle.rs
++++ b/src-tauri/src/commands/messages/lifecycle.rs
+@@ -513,7 +513,7 @@ pub async fn delete_message(
+     let (msg, provider_type) = resolve_message_context(&state, &message_id)?;
+ 
+     let source_folder = find_message_folder(&state, &message_id, &msg.account_id)?;
+-    let trash_folder = find_folder_by_role(&state, &msg.account_id, FolderRole::Trash).ok();
++    let mut trash_folder = find_folder_by_role(&state, &msg.account_id, FolderRole::Trash).ok();
+     let is_permanent = source_folder.role == Some(FolderRole::Trash);
+ 
+     let outcome = match provider_type {
+@@ -667,25 +667,38 @@ pub async fn delete_message(
+         },
+         ProviderType::Imap => {
+             let source_is_local = source_folder.remote_id.starts_with("__local_");
+-            let target_trash_is_local = trash_folder
+-                .as_ref()
+-                .is_some_and(|folder| folder.remote_id.starts_with("__local_"));
+-            let can_move_to_remote_trash = trash_folder
+-                .as_ref()
+-                .is_some_and(|folder| folder.id != source_folder.id && !target_trash_is_local);
+-
+-            if source_is_local || (!is_permanent && target_trash_is_local) {
++            if source_is_local {
+                 RemoteMutationOutcome::LocalOnly
+             } else {
+                 let uid = parse_imap_uid(&msg.remote_id)?;
+                 match connect_imap(&state, &msg.account_id).await {
+                     Ok(imap) => {
+-                        let result = if !is_permanent && can_move_to_remote_trash {
+-                            let trash = trash_folder.as_ref().expect("checked above");
+-                            imap.move_message(&source_folder.remote_id, uid, &trash.remote_id)
+-                                .await
+-                        } else {
++                        let result = if is_permanent {
+                             imap.delete_message(&source_folder.remote_id, uid).await
++                        } else {
++                            // Missing local Trash is a discovery request, never permission
++                            // to permanently delete the source message.
++                            match imap
++                                .ensure_trash_folder(&state.store, &msg.account_id)
++                                .await
++                            {
++                                Ok(trash) => {
++                                    trash_folder = Some(trash.clone());
++                                    imap_move_tracked(
++                                        &state,
++                                        &imap,
++                                        &msg,
++                                        &source_folder.remote_id,
++                                        uid,
++                                        &trash.remote_id,
++                                    )
++                                    .await
++                                }
++                                Err(error) => {
++                                    let _ = imap.disconnect().await;
++                                    return Err(error);
++                                }
++                            }
+                         };
+                         let _ = imap.disconnect().await;
+                         match classify_remote_delete_result(result, is_permanent) {
+@@ -718,11 +731,7 @@ pub async fn delete_message(
+                     }
+                     Err(e) => {
+                         let error = e.to_string();
+-                        let queue_remote_op = if is_permanent {
+-                            queue_pending_remote_op
+-                        } else {
+-                            queue_pending_remote_op_for_local_commit
+-                        };
++                        let queue_remote_op = queue_pending_remote_op;
+                         let outcome = queue_remote_op(
+                             &state,
+                             &msg,
+diff --git a/src-tauri/src/commands/pending_mail_ops.rs b/src-tauri/src/commands/pending_mail_ops.rs
+index ae21035c839e3289938c7cbf05cb3337cc3b5070..edda1b01705a9f1df1e5b39f17323e0b8f5e45a9 100644
+--- a/src-tauri/src/commands/pending_mail_ops.rs
++++ b/src-tauri/src/commands/pending_mail_ops.rs
+@@ -537,26 +537,25 @@ async fn replay_remote_delete(
+             let imap = connect_imap(state, &message.account_id).await?;
+             let result = if permanent {
+                 imap.delete_message(&source_remote_id, uid).await
+-            } else if let Some(trash_remote_id) = string_field(payload, "trash_folder_remote_id")
+-                .or_else(|| {
+-                    find_folder_by_role(state, &message.account_id, FolderRole::Trash)
+-                        .ok()
+-                        .map(|folder| folder.remote_id)
+-                })
+-            {
+-                if trash_remote_id == source_remote_id {
+-                    imap.delete_message(&source_remote_id, uid).await
+-                } else {
+-                    imap.move_message_with_dedup(
+-                        &source_remote_id,
+-                        uid,
+-                        &trash_remote_id,
+-                        message.message_id_header.as_deref(),
+-                    )
++            } else {
++                match imap
++                    .ensure_trash_folder(&state.store, &message.account_id)
+                     .await
++                {
++                    Ok(trash) if trash.remote_id == source_remote_id => Ok(()),
++                    Ok(trash) => {
++                        imap_move_tracked(
++                            state,
++                            &imap,
++                            message,
++                            &source_remote_id,
++                            uid,
++                            &trash.remote_id,
++                        )
++                        .await
++                    }
++                    Err(error) => Err(error),
+                 }
+-            } else {
+-                imap.delete_message(&source_remote_id, uid).await
+             };
+             let _ = imap.disconnect().await;
+             classify_remote_delete_result(result, permanent)
+@@ -715,15 +714,8 @@ fn apply_pending_local_commit(
+         }
+         "delete" => {
+             if let Some(trash_folder_id) = string_field(&payload, "trash_folder_id") {
+-                let current = store
+-                    .get_message_folder_ids(&op.message_id)?
+-                    .into_iter()
+-                    .next();
+-                if current.as_deref() != Some(trash_folder_id.as_str()) {
+-                    store.move_message_to_folder(&op.message_id, &trash_folder_id)?;
+-                } else {
+-                    store.soft_delete_message(&op.message_id)?;
+-                }
++                // Idempotent after a tracked MOVE or a retry: keep Trash visible.
++                store.move_message_to_folder(&op.message_id, &trash_folder_id)?;
+             } else if let Some(trash) =
+                 store.find_folder_by_role(&op.account_id, FolderRole::Trash)?
+             {
+@@ -1176,6 +1168,38 @@ mod tests {
+         assert_eq!(op.status.as_str(), "done");
+     }
+ 
++    #[test]
++    fn replay_delete_keeps_already_moved_message_visible_in_trash() {
++        let store = Store::open_in_memory().unwrap();
++        let account = test_account();
++        store.insert_account(&account).unwrap();
++        let trash = test_folder(&account.id, FolderRole::Trash, "Trash", "Trash");
++        store.insert_folder(&trash).unwrap();
++        let message = test_message(&account.id);
++        store
++            .insert_message(&message, std::slice::from_ref(&trash.id))
++            .unwrap();
++        store
++            .insert_pending_mail_op(
++                &account.id,
++                &message.id,
++                "delete",
++                &serde_json::json!({
++                    "payload": { "trash_folder_id": trash.id }
++                })
++                .to_string(),
++            )
++            .unwrap();
++        let op = store.list_pending_mail_ops(&account.id).unwrap().remove(0);
++        apply_pending_local_commit(&store, &op).unwrap();
++        apply_pending_local_commit(&store, &op).unwrap();
++        assert!(!store.get_message(&message.id).unwrap().unwrap().is_deleted);
++        assert_eq!(
++            store.get_message_folder_ids(&message.id).unwrap(),
++            vec![trash.id]
++        );
++    }
++
+     #[test]
+     fn local_commit_replays_archived_pending_op_after_remote_success() {
+         let store = Store::open_in_memory().unwrap();
+diff --git a/src/components/MessageList.tsx b/src/components/MessageList.tsx
+index 0c1b1aeba31194702de002b2c3683f9af8adbce7..1e5e07c0d0991961d806af7d774cc9c8a7a3134f 100644
+--- a/src/components/MessageList.tsx
++++ b/src/components/MessageList.tsx
+@@ -9,6 +9,7 @@ import { useAccountsQuery, useFoldersForAccountsQuery } from "@/hooks/queries";
+ import { useMailStore } from "@/stores/mail.store";
+ import { useToastStore } from "@/stores/toast.store";
+ import { useConfirmStore } from "@/stores/confirm.store";
++import { extractErrorMessage } from "@/lib/extractErrorMessage";
+ import { roleForSelection } from "@/lib/folderAggregation";
+ import { assignAccountColors, getAccountColor, getAccountLabel } from "@/lib/accountColors";
+ import MessageItem from "./MessageItem";
+@@ -46,6 +47,7 @@ export default function MessageList({
+   const selectAllMessages = useMailStore((s) => s.selectAllMessages);
+   const clearSelection = useMailStore((s) => s.clearSelection);
+   const [batchLoading, setBatchLoading] = useState(false);
++  const batchInFlight = useRef(false);
+   const confirm = useConfirmStore((s) => s.confirm);
+   const activeAccountId = useMailStore((s) => s.activeAccountId);
+   const activeFolderId = useMailStore((s) => s.activeFolderId);
+@@ -127,23 +129,28 @@ export default function MessageList({
+   }
+ 
+   async function handleBatchAction(action: "archive" | "delete" | "markRead" | "markUnread" | "star" | "unstar") {
+-    const ids = [...selectedMessageIds];
++    if (batchInFlight.current) return;
++    const visibleIds = new Set(messageIds);
++    const ids = [...selectedMessageIds].filter((id) => visibleIds.has(id));
+     if (ids.length === 0) return;
+-    if (action === "delete") {
+-      const count = ids.length;
+-      const ok = await confirm({
+-        title: t("batch.deleteTitle", { count, defaultValue: `Delete ${count} messages?` }),
+-        message: t("batch.deleteConfirm", {
+-          count,
+-          defaultValue: `This will move ${count} message(s) to Trash. This action can be undone by restoring from Trash.`,
+-        }),
+-        confirmLabel: t("batch.deleteButton", { defaultValue: "Delete" }),
+-        destructive: true,
+-      });
+-      if (!ok) return;
+-    }
++    batchInFlight.current = true;
+     setBatchLoading(true);
++    let submitted = false;
+     try {
++      if (action === "delete") {
++        const count = ids.length;
++        const ok = await confirm({
++          title: t("batch.deleteTitle", { count, defaultValue: `Delete ${count} messages?` }),
++          message: t("batch.deleteConfirm", {
++            count,
++            defaultValue: `This will move ${count} message(s) to Trash. Messages already in Trash will be permanently deleted.`,
++          }),
++          confirmLabel: t("batch.deleteButton", { defaultValue: "Delete" }),
++          destructive: true,
++        });
++        if (!ok) return;
++      }
++      submitted = true;
+       let count = 0;
+       if (action === "archive") count = await batchArchive(ids);
+       else if (action === "delete") count = await batchDelete(ids);
+@@ -151,15 +158,34 @@ export default function MessageList({
+       else if (action === "markUnread") count = await batchMarkRead(ids, false);
+       else if (action === "star") count = await batchStar(ids, true);
+       else count = await batchStar(ids, false);
+-      invalidateMessageViews();
+-      if (batchActionChangesUnreadCounts(action)) {
+-        queryClient.invalidateQueries({ queryKey: ["folder-unread-counts"] });
++      if (count === 0) {
++        addToast({ message: t("batch.noneUpdated"), type: "error" });
++      } else {
++        addToast({
++          message: count === ids.length
++            ? t("batch.success", { count })
++            : t("batch.partial", { count, total: ids.length }),
++          type: count === ids.length ? "success" : "info",
++        });
++        // A count-only response cannot identify failures. Do not allow a retry
++        // to permanently delete messages that were already moved to Trash.
++        clearSelection();
+       }
+-      addToast({ message: t("batch.success", { count }), type: "success" });
+-      clearSelection();
+-    } catch {
+-      addToast({ message: t("batch.failed"), type: "error" });
++    } catch (error) {
++      addToast({ message: `${t("batch.failed")}: ${extractErrorMessage(error)}`, type: "error" });
++      if (submitted && action === "delete") clearSelection();
+     } finally {
++      if (submitted) {
++        // A thrown error may still follow partial remote success.
++        invalidateMessageViews();
++        if (batchActionChangesUnreadCounts(action)) {
++          queryClient.invalidateQueries({ queryKey: ["folder-unread-counts"] });
++        }
++        if (action === "delete") {
++          queryClient.invalidateQueries({ queryKey: ["folders"] });
++        }
++      }
++      batchInFlight.current = false;
+       setBatchLoading(false);
+     }
+   }
+diff --git a/src/components/StatusBar.tsx b/src/components/StatusBar.tsx
+index 5a9481bffa9d5d17ce17f062481bc9878f84cbd8..b2578a05f8cc128dfb7d549ee1e959713ef7d3e3 100644
+--- a/src/components/StatusBar.tsx
++++ b/src/components/StatusBar.tsx
+@@ -69,12 +69,15 @@ export default function StatusBar() {
+ 
+   // Listen for mail:error events from Rust backend
+   useEffect(() => {
++    let clearErrorTimer: ReturnType<typeof setTimeout> | undefined;
+     const unlisten = listen<MailErrorPayload>("mail:error", (event) => {
++      if (clearErrorTimer !== undefined) clearTimeout(clearErrorTimer);
+       setLastMailError(event.payload.message);
+-      // Auto-clear error after 10 seconds
+-      setTimeout(() => setLastMailError(null), 10_000);
++      // A previous error's timer must not erase a newer error.
++      clearErrorTimer = setTimeout(() => setLastMailError(null), 10_000);
+     });
+     return () => {
++      if (clearErrorTimer !== undefined) clearTimeout(clearErrorTimer);
+       unlisten.then((fn) => fn());
+     };
+   }, [setLastMailError]);
+diff --git a/src/locales/en.json b/src/locales/en.json
+index c383e500e1a648881aca2fe3caaf0003b5668468..b888e7ea59deb808539897b24719624b10ea6d26 100644
+--- a/src/locales/en.json
++++ b/src/locales/en.json
+@@ -802,8 +802,10 @@
+     "markUnread": "Mark as unread",
+     "success": "{{count}} messages updated",
+     "failed": "Batch operation failed",
++    "noneUpdated": "No messages were updated. Refresh the list and check the account connection or pending operations.",
++    "partial": "Updated {{count}} of {{total}} messages. Refresh and select the remaining messages to retry.",
+     "deleteTitle": "Delete {{count}} messages?",
+-    "deleteConfirm": "This will move {{count}} message(s) to Trash. This action can be undone by restoring from Trash.",
++    "deleteConfirm": "This will move {{count}} message(s) to Trash. Messages already in Trash will be permanently deleted.",
+     "deleteButton": "Delete",
+     "selectMessage": "Select message",
+     "star": "Star",
+diff --git a/src/locales/zh.json b/src/locales/zh.json
+index 678c05f2d18fe0347440e3bf2d63b4c5ea27aacd..8ab5336b19170ba6655c71ae936f1a02759c8047 100644
+--- a/src/locales/zh.json
++++ b/src/locales/zh.json
+@@ -802,8 +802,10 @@
+     "markUnread": "标记为未读",
+     "success": "{{count}} 条消息已更新",
+     "failed": "批量操作失败",
++    "noneUpdated": "没有更新任何邮件，请刷新列表并检查账号连接或待处理操作。",
++    "partial": "已更新 {{count}} / {{total}} 封邮件，请刷新后重新选择剩余邮件重试。",
+     "deleteTitle": "删除 {{count}} 封邮件？",
+-    "deleteConfirm": "将 {{count}} 封邮件移至废纸篓。可以从废纸篓恢复。",
++    "deleteConfirm": "将 {{count}} 封邮件移至废纸篓。已在废纸篓中的邮件将被永久删除。",
+     "deleteButton": "删除",
+     "selectMessage": "选择邮件",
+     "star": "加星标",
+diff --git a/tests/components/MessageList.test.tsx b/tests/components/MessageList.test.tsx
+index c01af982c57d5da24203b60cd0eb7a4234741fe0..63992e85d48d3369f0a3c38d7596ee5390189a02 100644
+--- a/tests/components/MessageList.test.tsx
++++ b/tests/components/MessageList.test.tsx
+@@ -1,4 +1,4 @@
+-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+ import { beforeEach, describe, expect, it, vi } from "vitest";
+ import type { Account, Folder, MessageSummary } from "../../src/lib/api";
+ import { useMailStore } from "../../src/stores/mail.store";
+@@ -394,6 +394,77 @@ describe("MessageList", () => {
+     expect(mocks.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folder-unread-counts"] });
+   });
+ 
++  function renderDeletion() {
++    useMailStore.setState({ batchMode: true, selectedMessageIds: new Set(["m-1", "m-2"]) });
++    render(<MessageList messages={[makeMessage("m-1"), makeMessage("m-2")]}
++      selectedMessageId={null} onSelectMessage={vi.fn()} loading={false} />);
++  }
++
++  it("does not report zero updates as success or clear the selection", async () => {
++    mocks.batchDelete.mockResolvedValueOnce(0);
++    renderDeletion();
++    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
++    await waitFor(() => expect(mocks.addToast).toHaveBeenCalledWith({
++      message: "batch.noneUpdated", type: "error",
++    }));
++    expect(useMailStore.getState().selectedMessageIds.size).toBe(2);
++    expect(mocks.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folders"] });
++  });
++
++  it("reports partial completion and prevents blindly repeating a destructive selection", async () => {
++    mocks.batchDelete.mockResolvedValueOnce(1);
++    renderDeletion();
++    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
++    await waitFor(() => expect(mocks.addToast).toHaveBeenCalledWith({
++      message: "batch.partial", type: "info",
++    }));
++    expect(useMailStore.getState().selectedMessageIds.size).toBe(0);
++  });
++
++  it("shows the backend error and refreshes views after possible partial failure", async () => {
++    mocks.batchDelete.mockRejectedValueOnce({ kind: "Validation", message: "No Trash folder found" });
++    renderDeletion();
++    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
++    await waitFor(() => expect(mocks.addToast).toHaveBeenCalledWith({
++      message: "batch.failed: No Trash folder found", type: "error",
++    }));
++    expect(mocks.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["messages"] });
++    expect(mocks.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folders"] });
++    expect(useMailStore.getState().selectedMessageIds.size).toBe(0);
++  });
++
++  it("guards against duplicate confirmation and submission", async () => {
++    let resolveConfirm!: (value: boolean) => void;
++    mocks.confirm.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveConfirm = resolve; }));
++    renderDeletion();
++    const button = screen.getByRole("button", { name: "common.delete" });
++    fireEvent.click(button);
++    fireEvent.click(button);
++    expect(mocks.confirm).toHaveBeenCalledTimes(1);
++    expect(mocks.batchDelete).not.toHaveBeenCalled();
++    resolveConfirm(true);
++    await waitFor(() => expect(mocks.batchDelete).toHaveBeenCalledTimes(1));
++    expect(mocks.confirm.mock.calls[0][0].message).toContain("permanently deleted");
++  });
++
++  it("releases the busy state after cancelling confirmation", async () => {
++    mocks.confirm.mockResolvedValueOnce(false);
++    renderDeletion();
++    const button = screen.getByRole("button", { name: "common.delete" });
++    fireEvent.click(button);
++    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
++    expect(mocks.batchDelete).not.toHaveBeenCalled();
++    fireEvent.click(button);
++    await waitFor(() => expect(mocks.batchDelete).toHaveBeenCalledTimes(1));
++  });
++
++  it("does not submit stale selections from another folder", async () => {
++    renderDeletion();
++    act(() => useMailStore.setState({ selectedMessageIds: new Set(["m-1", "stale-id"]) }));
++    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
++    await waitFor(() => expect(mocks.batchDelete).toHaveBeenCalledWith(["m-1"]));
++  });
++
+   it("uses the custom checkbox control for select all", () => {
+     useMailStore.setState({ batchMode: true });
+ 
+diff --git a/tests/components/StatusBar.realtime.test.tsx b/tests/components/StatusBar.realtime.test.tsx
+index 5cb9ce37539bd352e01df4f5c86413c118f2185a..742944c81d88c72d3870fc5c5b759ce3217a5175 100644
+--- a/tests/components/StatusBar.realtime.test.tsx
++++ b/tests/components/StatusBar.realtime.test.tsx
+@@ -237,6 +237,39 @@ describe("StatusBar realtime mail events", () => {
+     expect(mocks.uiState.setSyncStatus).not.toHaveBeenCalledWith("idle");
+   });
+ 
++  it("keeps a newer error visible for its own timeout", () => {
++    vi.useFakeTimers();
++    const view = render(<StatusBar />);
++    try {
++      const emit = mocks.listeners.get("mail:error")!;
++      emit({ payload: { message: "first failure" } });
++      vi.advanceTimersByTime(5_000);
++      emit({ payload: { message: "second failure" } });
++      mocks.uiState.setLastMailError.mockClear();
++      vi.advanceTimersByTime(5_000);
++      expect(mocks.uiState.setLastMailError).not.toHaveBeenCalled();
++      vi.advanceTimersByTime(5_000);
++      expect(mocks.uiState.setLastMailError).toHaveBeenCalledWith(null);
++    } finally {
++      view.unmount();
++      vi.useRealTimers();
++    }
++  });
++
++  it("cancels the error timeout when unmounted", () => {
++    vi.useFakeTimers();
++    const view = render(<StatusBar />);
++    try {
++      mocks.listeners.get("mail:error")!({ payload: { message: "failure" } });
++      view.unmount();
++      mocks.uiState.setLastMailError.mockClear();
++      vi.advanceTimersByTime(10_000);
++      expect(mocks.uiState.setLastMailError).not.toHaveBeenCalled();
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
+   it("reports a sync error when a sync pass fails", async () => {
+     render(<StatusBar />);
+ 

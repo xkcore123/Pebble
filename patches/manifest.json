@@ -1,0 +1,21 @@
+{
+  "base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97",
+  "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
+  "patch": "pebble-fixes.patch",
+  "sha256": "f298d4ef077332f25d04a73180421157a2c921993d5d342fb156a2734beefb52",
+  "files": [
+    "crates/pebble-mail/src/imap.rs",
+    "crates/pebble-mail/src/lib.rs",
+    "crates/pebble-mail/src/sync.rs",
+    "crates/pebble-mail/src/test_imap.rs",
+    "src-tauri/src/commands/batch.rs",
+    "src-tauri/src/commands/messages/lifecycle.rs",
+    "src-tauri/src/commands/pending_mail_ops.rs",
+    "src/components/MessageList.tsx",
+    "src/components/StatusBar.tsx",
+    "src/locales/en.json",
+    "src/locales/zh.json",
+    "tests/components/MessageList.test.tsx",
+    "tests/components/StatusBar.realtime.test.tsx"
+  ]
+}
