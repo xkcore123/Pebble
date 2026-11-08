@@ -1,0 +1,63 @@
+name: Weekly Upstream Sync
+
+on:
+  schedule:
+    # Monday 09:17 Asia/Shanghai (GitHub schedules use UTC).
+    - cron: '17 1 * * 1'
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: Also rebuild when already up to date (manual recovery only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'xkcore123/Pebble' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      sha: ${{ steps.sync.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Configure merge identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Test sync safeguards
+        run: node --test scripts/weekly-sync-checks.mjs
+      - name: Sync upstream only if the patch remains applicable
+        id: sync
+        run: node scripts/weekly-upstream.mjs
+      - name: Explain a stopped sync
+        if: failure()
+        run: |
+          echo '### Upstream sync stopped' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Inspect the failed step. Merge/patch conflicts must be resolved before retrying; no force-push or partial patch application is used.' >> "$GITHUB_STEP_SUMMARY"
+
+  # GITHUB_TOKEN pushes do not trigger other push workflows. Call the build
+  # explicitly, with the exact synchronized commit, rather than relying on push.
+  build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || inputs.rebuild == true
+    permissions:
+      contents: read
+    uses: ./.github/workflows/patched-build.yml
+    with:
+      build_ref: ${{ needs.sync.outputs.sha }}
