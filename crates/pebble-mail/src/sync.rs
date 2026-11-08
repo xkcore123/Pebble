@@ -3419,8 +3419,7 @@ mod tests {
     #[test]
     fn imap_windows_connection_reset_is_retryable_for_polling() {
         let error = pebble_core::PebbleError::Network(
-            "SELECT failed: io: 远程主机强迫关闭了一个现有的连接。 (os error 10054)"
-                .to_string(),
+            "SELECT failed: io: 远程主机强迫关闭了一个现有的连接。 (os error 10054)".to_string(),
         );
 
         assert!(is_retryable_imap_connection_error(&error));
