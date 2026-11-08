@@ -54,6 +54,7 @@ git push origin master
   然后直接调用 Patched Build，以这次同步的精确提交编译三平台。
 - 合并冲突、补丁失效：停止，远端 `master` 不会被本次同步修改。编译或测试失败：
   Actions 显示失败，不发布 Release、不自动安装到电脑。
+- 打包工具下载遇到 HTTP 429/5xx 时最多尝试 3 次；不会重试或忽略代码、测试错误。
 - GitHub 的 `GITHUB_TOKEN` 推送不会再次触发 push 工作流，因此这里显式调用
   可复用构建，不依赖 push 连锁触发，也不需要另存个人访问令牌。
 - 在 Actions 手动运行同一任务可立即检查；`rebuild` 默认关闭，仅在修复构建失败
