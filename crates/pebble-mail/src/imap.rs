@@ -2078,13 +2078,9 @@ impl ImapProvider {
         }
 
         let mut idle_handle = session.idle();
-        if let Err(e) =
-            with_imap_timeout("IDLE init", IMAP_COMMAND_TIMEOUT_SECS, idle_handle.init()).await
-        {
-            // A failed/timed-out IDLE init leaves protocol state uncertain.
-            // Drop the session instead of waiting indefinitely for DONE.
-            return Err(e);
-        }
+        // A failed/timed-out IDLE init leaves protocol state uncertain.
+        // Drop the session instead of waiting indefinitely for DONE.
+        with_imap_timeout("IDLE init", IMAP_COMMAND_TIMEOUT_SECS, idle_handle.init()).await?;
 
         let (wait_fut, _stop_source) = idle_handle.wait_with_timeout(timeout_dur);
         let idle_result = wait_fut.await;
