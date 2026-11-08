@@ -1216,30 +1216,41 @@ impl ImapProvider {
 
     /// List folders for the given account, returning `Folder` structs.
     pub async fn list_folders(&self, account_id: &str) -> Result<Vec<Folder>> {
+        self.list_folders_with_timeout(account_id, IMAP_COMMAND_TIMEOUT_SECS)
+            .await
+    }
+
+    async fn list_folders_with_timeout(
+        &self,
+        account_id: &str,
+        seconds: u64,
+    ) -> Result<Vec<Folder>> {
         let mut guard = self.session.lock().await;
         let sess = guard
             .as_mut()
             .ok_or_else(|| PebbleError::Network("Not connected".to_string()))?;
 
-        let mailboxes: Vec<(String, Vec<NameAttribute<'static>>)> = {
-            let stream = sess
-                .list(None, Some("*"))
-                .await
-                .map_err(|e| PebbleError::Network(format!("LIST failed: {e}")))?;
-            stream
-                .map_ok(|n| {
-                    let attributes = n
-                        .attributes()
-                        .iter()
-                        .cloned()
-                        .map(NameAttribute::into_owned)
-                        .collect();
-                    (n.name().to_string(), attributes)
-                })
-                .try_collect()
-                .await
-                .map_err(|e| PebbleError::Network(format!("LIST collect: {e}")))?
-        };
+        let mailboxes: Vec<(String, Vec<NameAttribute<'static>>)> =
+            with_imap_timeout("LIST", seconds, async {
+                let stream = sess
+                    .list(None, Some("*"))
+                    .await
+                    .map_err(|e| PebbleError::Network(format!("LIST failed: {e}")))?;
+                stream
+                    .map_ok(|n| {
+                        let attributes = n
+                            .attributes()
+                            .iter()
+                            .cloned()
+                            .map(NameAttribute::into_owned)
+                            .collect();
+                        (n.name().to_string(), attributes)
+                    })
+                    .try_collect()
+                    .await
+                    .map_err(|e| PebbleError::Network(format!("LIST collect: {e}")))
+            })
+            .await?;
 
         let mut folders: Vec<Folder> = mailboxes
             .into_iter()
@@ -1268,6 +1279,34 @@ impl ImapProvider {
 
         folders.sort_by_key(|f| f.sort_order);
         Ok(folders)
+    }
+
+    /// Deletion must not depend on whether Trash was selected for synchronization.
+    /// Discover it on the server if needed, retaining the persisted folder ID.
+    /// Never substitute permanent deletion or create an arbitrary remote mailbox.
+    pub async fn ensure_trash_folder(
+        &self,
+        store: &pebble_store::Store,
+        account_id: &str,
+    ) -> Result<Folder> {
+        if let Some(folder) = store.find_folder_by_role(account_id, FolderRole::Trash)? {
+            if !folder.remote_id.starts_with("__local_") {
+                return Ok(folder);
+            }
+        }
+        let mut folder = self
+            .list_folders(account_id)
+            .await?
+            .into_iter()
+            .find(|folder| folder.role == Some(FolderRole::Trash))
+            .ok_or_else(|| {
+                PebbleError::Validation(
+                    "No Trash folder found locally or on the IMAP server; messages were not deleted"
+                        .into(),
+                )
+            })?;
+        folder.id = store.insert_folder(&folder)?;
+        Ok(folder)
     }
 
     /// Fetch raw message bytes from a mailbox.
@@ -2211,6 +2250,117 @@ mod tls_config_tests {
     use super::{
         build_native_tls_connector, build_tls_connector, imap_timeout_error, ImapConfig, SmtpConfig,
     };
+
+    fn trash_test_store() -> pebble_store::Store {
+        let store = pebble_store::Store::open_in_memory().unwrap();
+        store
+            .insert_account(&pebble_core::Account {
+                id: "trash-test".into(),
+                email: "fixture@example.invalid".into(),
+                display_name: "Fixture".into(),
+                account_label: None,
+                provider_display_name: None,
+                color: None,
+                provider: pebble_core::ProviderType::Imap,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn discovers_unsynced_163_trash_and_preserves_existing_folder_id() {
+        let server =
+            crate::test_imap::Server::start(crate::test_imap::Behavior::TrashMailbox).await;
+        let provider = super::ImapProvider::new(server.config());
+        provider.connect().await.unwrap();
+        let store = trash_test_store();
+        let mut existing = provider
+            .list_folders("trash-test")
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(existing.name, "已删除");
+        existing.id = "persisted-id".into();
+        existing.role = None;
+        store.insert_folder(&existing).unwrap();
+        let trash = provider
+            .ensure_trash_folder(&store, "trash-test")
+            .await
+            .unwrap();
+        assert_eq!(trash.id, "persisted-id");
+        assert_eq!(trash.role, Some(pebble_core::FolderRole::Trash));
+        assert_eq!(trash.remote_id, "&XfJSIJZk-");
+        let lists = server.command_count("LIST");
+        assert_eq!(
+            provider
+                .ensure_trash_folder(&store, "trash-test")
+                .await
+                .unwrap()
+                .id,
+            trash.id
+        );
+        assert_eq!(
+            server.command_count("LIST"),
+            lists,
+            "cached Trash must avoid another LIST"
+        );
+        assert_eq!(store.list_folders("trash-test").unwrap().len(), 1);
+        provider.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_server_trash_is_an_error_without_mutation() {
+        let server = crate::test_imap::Server::start(crate::test_imap::Behavior::NoTrash).await;
+        let provider = super::ImapProvider::new(server.config());
+        provider.connect().await.unwrap();
+        let store = trash_test_store();
+        let error = provider
+            .ensure_trash_folder(&store, "trash-test")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, pebble_core::PebbleError::Validation(_)));
+        assert!(store.list_folders("trash-test").unwrap().is_empty());
+        assert_eq!(server.command_count("UID"), 0);
+        assert_eq!(server.command_count("EXPUNGE"), 0);
+        provider.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_failure_is_not_misreported_as_missing_trash() {
+        let server = crate::test_imap::Server::start(crate::test_imap::Behavior::ListDenied).await;
+        let provider = super::ImapProvider::new(server.config());
+        provider.connect().await.unwrap();
+        let error = provider
+            .ensure_trash_folder(&trash_test_store(), "trash-test")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, pebble_core::PebbleError::Network(_)));
+        assert!(error.to_string().contains("LIST"));
+        provider.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_and_stream_collection_have_a_bounded_timeout() {
+        for behavior in [
+            crate::test_imap::Behavior::SilentList,
+            crate::test_imap::Behavior::SilentListCollect,
+        ] {
+            let server = crate::test_imap::Server::start(behavior).await;
+            let provider = super::ImapProvider::new(server.config());
+            provider.connect().await.unwrap();
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                provider.list_folders_with_timeout("trash-test", 1),
+            )
+            .await
+            .expect("LIST including stream collection must be bounded")
+            .unwrap_err();
+            assert!(error.to_string().contains("LIST timed out"));
+        }
+    }
 
     #[test]
     fn login_transport_failure_is_not_misreported_as_bad_credentials() {

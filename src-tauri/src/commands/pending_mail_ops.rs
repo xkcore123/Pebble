@@ -537,26 +537,25 @@ async fn replay_remote_delete(
             let imap = connect_imap(state, &message.account_id).await?;
             let result = if permanent {
                 imap.delete_message(&source_remote_id, uid).await
-            } else if let Some(trash_remote_id) = string_field(payload, "trash_folder_remote_id")
-                .or_else(|| {
-                    find_folder_by_role(state, &message.account_id, FolderRole::Trash)
-                        .ok()
-                        .map(|folder| folder.remote_id)
-                })
-            {
-                if trash_remote_id == source_remote_id {
-                    imap.delete_message(&source_remote_id, uid).await
-                } else {
-                    imap.move_message_with_dedup(
-                        &source_remote_id,
-                        uid,
-                        &trash_remote_id,
-                        message.message_id_header.as_deref(),
-                    )
-                    .await
-                }
             } else {
-                imap.delete_message(&source_remote_id, uid).await
+                match imap
+                    .ensure_trash_folder(&state.store, &message.account_id)
+                    .await
+                {
+                    Ok(trash) if trash.remote_id == source_remote_id => Ok(()),
+                    Ok(trash) => {
+                        imap_move_tracked(
+                            state,
+                            &imap,
+                            message,
+                            &source_remote_id,
+                            uid,
+                            &trash.remote_id,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
             };
             let _ = imap.disconnect().await;
             classify_remote_delete_result(result, permanent)
@@ -715,15 +714,8 @@ fn apply_pending_local_commit(
         }
         "delete" => {
             if let Some(trash_folder_id) = string_field(&payload, "trash_folder_id") {
-                let current = store
-                    .get_message_folder_ids(&op.message_id)?
-                    .into_iter()
-                    .next();
-                if current.as_deref() != Some(trash_folder_id.as_str()) {
-                    store.move_message_to_folder(&op.message_id, &trash_folder_id)?;
-                } else {
-                    store.soft_delete_message(&op.message_id)?;
-                }
+                // Idempotent after a tracked MOVE or a retry: keep Trash visible.
+                store.move_message_to_folder(&op.message_id, &trash_folder_id)?;
             } else if let Some(trash) =
                 store.find_folder_by_role(&op.account_id, FolderRole::Trash)?
             {
@@ -1174,6 +1166,38 @@ mod tests {
         );
         let op = store.list_pending_mail_ops(&account.id).unwrap().remove(0);
         assert_eq!(op.status.as_str(), "done");
+    }
+
+    #[test]
+    fn replay_delete_keeps_already_moved_message_visible_in_trash() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_account();
+        store.insert_account(&account).unwrap();
+        let trash = test_folder(&account.id, FolderRole::Trash, "Trash", "Trash");
+        store.insert_folder(&trash).unwrap();
+        let message = test_message(&account.id);
+        store
+            .insert_message(&message, std::slice::from_ref(&trash.id))
+            .unwrap();
+        store
+            .insert_pending_mail_op(
+                &account.id,
+                &message.id,
+                "delete",
+                &serde_json::json!({
+                    "payload": { "trash_folder_id": trash.id }
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let op = store.list_pending_mail_ops(&account.id).unwrap().remove(0);
+        apply_pending_local_commit(&store, &op).unwrap();
+        apply_pending_local_commit(&store, &op).unwrap();
+        assert!(!store.get_message(&message.id).unwrap().unwrap().is_deleted);
+        assert_eq!(
+            store.get_message_folder_ids(&message.id).unwrap(),
+            vec![trash.id]
+        );
     }
 
     #[test]

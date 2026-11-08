@@ -513,7 +513,7 @@ pub async fn delete_message(
     let (msg, provider_type) = resolve_message_context(&state, &message_id)?;
 
     let source_folder = find_message_folder(&state, &message_id, &msg.account_id)?;
-    let trash_folder = find_folder_by_role(&state, &msg.account_id, FolderRole::Trash).ok();
+    let mut trash_folder = find_folder_by_role(&state, &msg.account_id, FolderRole::Trash).ok();
     let is_permanent = source_folder.role == Some(FolderRole::Trash);
 
     let outcome = match provider_type {
@@ -667,25 +667,38 @@ pub async fn delete_message(
         },
         ProviderType::Imap => {
             let source_is_local = source_folder.remote_id.starts_with("__local_");
-            let target_trash_is_local = trash_folder
-                .as_ref()
-                .is_some_and(|folder| folder.remote_id.starts_with("__local_"));
-            let can_move_to_remote_trash = trash_folder
-                .as_ref()
-                .is_some_and(|folder| folder.id != source_folder.id && !target_trash_is_local);
-
-            if source_is_local || (!is_permanent && target_trash_is_local) {
+            if source_is_local {
                 RemoteMutationOutcome::LocalOnly
             } else {
                 let uid = parse_imap_uid(&msg.remote_id)?;
                 match connect_imap(&state, &msg.account_id).await {
                     Ok(imap) => {
-                        let result = if !is_permanent && can_move_to_remote_trash {
-                            let trash = trash_folder.as_ref().expect("checked above");
-                            imap.move_message(&source_folder.remote_id, uid, &trash.remote_id)
-                                .await
-                        } else {
+                        let result = if is_permanent {
                             imap.delete_message(&source_folder.remote_id, uid).await
+                        } else {
+                            // Missing local Trash is a discovery request, never permission
+                            // to permanently delete the source message.
+                            match imap
+                                .ensure_trash_folder(&state.store, &msg.account_id)
+                                .await
+                            {
+                                Ok(trash) => {
+                                    trash_folder = Some(trash.clone());
+                                    imap_move_tracked(
+                                        &state,
+                                        &imap,
+                                        &msg,
+                                        &source_folder.remote_id,
+                                        uid,
+                                        &trash.remote_id,
+                                    )
+                                    .await
+                                }
+                                Err(error) => {
+                                    let _ = imap.disconnect().await;
+                                    return Err(error);
+                                }
+                            }
                         };
                         let _ = imap.disconnect().await;
                         match classify_remote_delete_result(result, is_permanent) {
@@ -718,11 +731,7 @@ pub async fn delete_message(
                     }
                     Err(e) => {
                         let error = e.to_string();
-                        let queue_remote_op = if is_permanent {
-                            queue_pending_remote_op
-                        } else {
-                            queue_pending_remote_op_for_local_commit
-                        };
+                        let queue_remote_op = queue_pending_remote_op;
                         let outcome = queue_remote_op(
                             &state,
                             &msg,

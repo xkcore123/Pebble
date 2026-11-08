@@ -9,6 +9,7 @@ import { useAccountsQuery, useFoldersForAccountsQuery } from "@/hooks/queries";
 import { useMailStore } from "@/stores/mail.store";
 import { useToastStore } from "@/stores/toast.store";
 import { useConfirmStore } from "@/stores/confirm.store";
+import { extractErrorMessage } from "@/lib/extractErrorMessage";
 import { roleForSelection } from "@/lib/folderAggregation";
 import { assignAccountColors, getAccountColor, getAccountLabel } from "@/lib/accountColors";
 import MessageItem from "./MessageItem";
@@ -46,6 +47,7 @@ export default function MessageList({
   const selectAllMessages = useMailStore((s) => s.selectAllMessages);
   const clearSelection = useMailStore((s) => s.clearSelection);
   const [batchLoading, setBatchLoading] = useState(false);
+  const batchInFlight = useRef(false);
   const confirm = useConfirmStore((s) => s.confirm);
   const activeAccountId = useMailStore((s) => s.activeAccountId);
   const activeFolderId = useMailStore((s) => s.activeFolderId);
@@ -127,23 +129,28 @@ export default function MessageList({
   }
 
   async function handleBatchAction(action: "archive" | "delete" | "markRead" | "markUnread" | "star" | "unstar") {
-    const ids = [...selectedMessageIds];
+    if (batchInFlight.current) return;
+    const visibleIds = new Set(messageIds);
+    const ids = [...selectedMessageIds].filter((id) => visibleIds.has(id));
     if (ids.length === 0) return;
-    if (action === "delete") {
-      const count = ids.length;
-      const ok = await confirm({
-        title: t("batch.deleteTitle", { count, defaultValue: `Delete ${count} messages?` }),
-        message: t("batch.deleteConfirm", {
-          count,
-          defaultValue: `This will move ${count} message(s) to Trash. This action can be undone by restoring from Trash.`,
-        }),
-        confirmLabel: t("batch.deleteButton", { defaultValue: "Delete" }),
-        destructive: true,
-      });
-      if (!ok) return;
-    }
+    batchInFlight.current = true;
     setBatchLoading(true);
+    let submitted = false;
     try {
+      if (action === "delete") {
+        const count = ids.length;
+        const ok = await confirm({
+          title: t("batch.deleteTitle", { count, defaultValue: `Delete ${count} messages?` }),
+          message: t("batch.deleteConfirm", {
+            count,
+            defaultValue: `This will move ${count} message(s) to Trash. Messages already in Trash will be permanently deleted.`,
+          }),
+          confirmLabel: t("batch.deleteButton", { defaultValue: "Delete" }),
+          destructive: true,
+        });
+        if (!ok) return;
+      }
+      submitted = true;
       let count = 0;
       if (action === "archive") count = await batchArchive(ids);
       else if (action === "delete") count = await batchDelete(ids);
@@ -151,15 +158,34 @@ export default function MessageList({
       else if (action === "markUnread") count = await batchMarkRead(ids, false);
       else if (action === "star") count = await batchStar(ids, true);
       else count = await batchStar(ids, false);
-      invalidateMessageViews();
-      if (batchActionChangesUnreadCounts(action)) {
-        queryClient.invalidateQueries({ queryKey: ["folder-unread-counts"] });
+      if (count === 0) {
+        addToast({ message: t("batch.noneUpdated"), type: "error" });
+      } else {
+        addToast({
+          message: count === ids.length
+            ? t("batch.success", { count })
+            : t("batch.partial", { count, total: ids.length }),
+          type: count === ids.length ? "success" : "info",
+        });
+        // A count-only response cannot identify failures. Do not allow a retry
+        // to permanently delete messages that were already moved to Trash.
+        clearSelection();
       }
-      addToast({ message: t("batch.success", { count }), type: "success" });
-      clearSelection();
-    } catch {
-      addToast({ message: t("batch.failed"), type: "error" });
+    } catch (error) {
+      addToast({ message: `${t("batch.failed")}: ${extractErrorMessage(error)}`, type: "error" });
+      if (submitted && action === "delete") clearSelection();
     } finally {
+      if (submitted) {
+        // A thrown error may still follow partial remote success.
+        invalidateMessageViews();
+        if (batchActionChangesUnreadCounts(action)) {
+          queryClient.invalidateQueries({ queryKey: ["folder-unread-counts"] });
+        }
+        if (action === "delete") {
+          queryClient.invalidateQueries({ queryKey: ["folders"] });
+        }
+      }
+      batchInFlight.current = false;
       setBatchLoading(false);
     }
   }

@@ -1,11 +1,11 @@
-//! Local, credential-free IMAP fixtures for connection recovery regressions.
+// Local, credential-free IMAP fixtures for connection and deletion regressions.
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::imap::{ConnectionSecurity, ImapConfig};
+use super::imap::{ConnectionSecurity, ImapConfig};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Behavior {
@@ -17,6 +17,11 @@ pub(crate) enum Behavior {
     SilentLogout,
     DropFirstLogin,
     RejectLogin,
+    TrashMailbox,
+    NoTrash,
+    ListDenied,
+    SilentList,
+    SilentListCollect,
 }
 
 pub(crate) struct Server {
@@ -49,6 +54,8 @@ impl Server {
                     let mut stream = BufReader::new(socket);
                     stream.get_mut().write_all(b"* OK Test IMAP ready\r\n").await.unwrap();
                     let mut idle_tag = String::new();
+                    let mut selected = String::new();
+                    let mut moved = false;
                     loop {
                         let mut line = String::new();
                         if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
@@ -73,7 +80,19 @@ impl Server {
                                 break;
                             }
                             format!("{tag} OK LOGIN completed\r\n")
+                        } else if command == "LIST" {
+                            match behavior {
+                                Behavior::SilentList => std::future::pending::<String>().await,
+                                Behavior::SilentListCollect => {
+                                    stream.get_mut().write_all(b"* LIST () \"/\" \"INBOX\"\r\n").await.unwrap();
+                                    std::future::pending::<String>().await
+                                }
+                                Behavior::ListDenied => format!("{tag} NO LIST denied\r\n"),
+                                Behavior::TrashMailbox => format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"&XfJSIJZk-\"\r\n{tag} OK LIST completed\r\n"),
+                                _ => format!("* LIST () \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n"),
+                            }
                         } else if command == "SELECT" {
+                            selected = words.next().unwrap_or("").trim_matches('"').to_string();
                             match behavior {
                                 Behavior::ByeThenEmpty | Behavior::ByeThenDenied if index == 0 => {
                                     stream.get_mut().write_all(b"* BYE problems with connection\r\n").await.unwrap();
@@ -84,6 +103,22 @@ impl Server {
                                 }
                                 Behavior::MissingInbox => format!("{tag} NO SELECT Folder not exist\r\n"),
                                 _ => format!("* FLAGS (\\Seen)\r\n* 0 EXISTS\r\n* OK [UIDVALIDITY 42] UIDs valid\r\n* OK [UIDNEXT 1] Next UID\r\n{tag} OK [READ-WRITE] SELECT completed\r\n"),
+                            }
+                        } else if command == "UID" {
+                            match words.next().unwrap_or("").to_ascii_uppercase().as_str() {
+                                "SEARCH" => {
+                                    let uid = if selected == "&XfJSIJZk-" && moved {
+                                        " 42"
+                                    } else if selected == "INBOX" && !moved {
+                                        " 7"
+                                    } else { "" };
+                                    format!("* SEARCH{uid}\r\n{tag} OK SEARCH completed\r\n")
+                                }
+                                "MOVE" => {
+                                    moved = true;
+                                    format!("{tag} OK MOVE completed\r\n")
+                                }
+                                _ => format!("{tag} OK completed\r\n"),
                             }
                         } else if command == "IDLE" {
                             idle_tag = tag;
@@ -123,11 +158,15 @@ impl Server {
     }
 
     pub(crate) fn login_count(&self) -> usize {
+        self.command_count("LOGIN")
+    }
+
+    pub(crate) fn command_count(&self, command: &str) -> usize {
         self.commands
             .lock()
             .unwrap()
             .iter()
-            .filter(|cmd| cmd.as_str() == "LOGIN")
+            .filter(|cmd| cmd.as_str() == command)
             .count()
     }
 }

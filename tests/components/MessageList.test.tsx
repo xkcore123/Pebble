@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account, Folder, MessageSummary } from "../../src/lib/api";
 import { useMailStore } from "../../src/stores/mail.store";
@@ -392,6 +392,77 @@ describe("MessageList", () => {
 
     await waitFor(() => expect(mocks.batchMarkRead).toHaveBeenCalledWith(["m-1", "m-2"], true));
     expect(mocks.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folder-unread-counts"] });
+  });
+
+  function renderDeletion() {
+    useMailStore.setState({ batchMode: true, selectedMessageIds: new Set(["m-1", "m-2"]) });
+    render(<MessageList messages={[makeMessage("m-1"), makeMessage("m-2")]}
+      selectedMessageId={null} onSelectMessage={vi.fn()} loading={false} />);
+  }
+
+  it("does not report zero updates as success or clear the selection", async () => {
+    mocks.batchDelete.mockResolvedValueOnce(0);
+    renderDeletion();
+    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
+    await waitFor(() => expect(mocks.addToast).toHaveBeenCalledWith({
+      message: "batch.noneUpdated", type: "error",
+    }));
+    expect(useMailStore.getState().selectedMessageIds.size).toBe(2);
+    expect(mocks.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folders"] });
+  });
+
+  it("reports partial completion and prevents blindly repeating a destructive selection", async () => {
+    mocks.batchDelete.mockResolvedValueOnce(1);
+    renderDeletion();
+    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
+    await waitFor(() => expect(mocks.addToast).toHaveBeenCalledWith({
+      message: "batch.partial", type: "info",
+    }));
+    expect(useMailStore.getState().selectedMessageIds.size).toBe(0);
+  });
+
+  it("shows the backend error and refreshes views after possible partial failure", async () => {
+    mocks.batchDelete.mockRejectedValueOnce({ kind: "Validation", message: "No Trash folder found" });
+    renderDeletion();
+    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
+    await waitFor(() => expect(mocks.addToast).toHaveBeenCalledWith({
+      message: "batch.failed: No Trash folder found", type: "error",
+    }));
+    expect(mocks.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["messages"] });
+    expect(mocks.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["folders"] });
+    expect(useMailStore.getState().selectedMessageIds.size).toBe(0);
+  });
+
+  it("guards against duplicate confirmation and submission", async () => {
+    let resolveConfirm!: (value: boolean) => void;
+    mocks.confirm.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveConfirm = resolve; }));
+    renderDeletion();
+    const button = screen.getByRole("button", { name: "common.delete" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);
+    expect(mocks.batchDelete).not.toHaveBeenCalled();
+    resolveConfirm(true);
+    await waitFor(() => expect(mocks.batchDelete).toHaveBeenCalledTimes(1));
+    expect(mocks.confirm.mock.calls[0][0].message).toContain("permanently deleted");
+  });
+
+  it("releases the busy state after cancelling confirmation", async () => {
+    mocks.confirm.mockResolvedValueOnce(false);
+    renderDeletion();
+    const button = screen.getByRole("button", { name: "common.delete" });
+    fireEvent.click(button);
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    expect(mocks.batchDelete).not.toHaveBeenCalled();
+    fireEvent.click(button);
+    await waitFor(() => expect(mocks.batchDelete).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not submit stale selections from another folder", async () => {
+    renderDeletion();
+    act(() => useMailStore.setState({ selectedMessageIds: new Set(["m-1", "stale-id"]) }));
+    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
+    await waitFor(() => expect(mocks.batchDelete).toHaveBeenCalledWith(["m-1"]));
   });
 
   it("uses the custom checkbox control for select all", () => {

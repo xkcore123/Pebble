@@ -48,6 +48,20 @@ Inbox, silent IDLE DONE/LOGOUT, transport loss during login, startup retries,
 manual-only behavior and cancellation during backoff. They never connect to
 real email providers.
 
+Deletion regressions additionally cover an unsynchronized 163-style `已删除`
+folder, retaining an existing folder ID, cached discovery, missing Trash,
+LIST errors and timeouts (including an incomplete LIST stream), tracked MOVE
+destination UIDs, and idempotent pending-operation commits. Normal IMAP deletion
+discovers and caches the server Trash when it is missing locally; it never
+falls back to permanent deletion. Permanent deletion remains a separate action
+for messages already in Trash. Folder discovery does not rewrite the user's
+configured sync selection.
+
+Frontend regressions cover zero/partial results, backend error details, query
+refresh after partial failure, stale selections, confirmation cancellation and
+duplicate submission. Test deletion only against disposable messages or the
+loopback fixture, not a user's real mailbox.
+
 Run:
 
 ```sh

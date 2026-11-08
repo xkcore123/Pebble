@@ -327,6 +327,66 @@ pub async fn batch_archive(
     Ok(success_count)
 }
 
+/// Resolve Trash before mutating anything. A MOVE is not a soft-delete: its
+/// destination UID and visible Trash membership must be persisted together.
+async fn delete_imap_message(
+    state: &AppState,
+    imap: &pebble_mail::ImapProvider,
+    msg: &Message,
+) -> Result<(), PebbleError> {
+    let source = find_message_folder(state, &msg.id, &msg.account_id)?;
+    let permanent = source.role == Some(FolderRole::Trash);
+    let trash = if permanent {
+        None
+    } else {
+        Some(
+            imap.ensure_trash_folder(&state.store, &msg.account_id)
+                .await?,
+        )
+    };
+    let result = if source.remote_id.starts_with("__local_") {
+        Ok(())
+    } else {
+        let uid = parse_imap_uid(&msg.remote_id)?;
+        if let Some(trash) = &trash {
+            imap_move_tracked(state, imap, msg, &source.remote_id, uid, &trash.remote_id).await
+        } else {
+            super::messages::classify_remote_delete_result(
+                imap.delete_message(&source.remote_id, uid).await,
+                true,
+            )
+        }
+    };
+    if let Err(error) = result {
+        queue_batch_pending_op(
+            state,
+            msg,
+            if permanent {
+                "delete_permanent"
+            } else {
+                "delete"
+            },
+            json!({
+                "source_folder_id": source.id,
+                "source_folder_remote_id": source.remote_id,
+                "trash_folder_id": trash.as_ref().map(|f| &f.id),
+                "trash_folder_remote_id": trash.as_ref().map(|f| &f.remote_id),
+                "permanent": permanent,
+            }),
+            &error.to_string(),
+        )?;
+        return Err(error);
+    }
+    if let Some(trash) = trash {
+        state.store.move_message_to_folder(&msg.id, &trash.id)?;
+    } else {
+        state
+            .store
+            .hard_delete_messages(std::slice::from_ref(&msg.id))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn batch_delete(
     state: State<'_, AppState>,
@@ -339,6 +399,8 @@ pub async fn batch_delete(
     // Track which messages were successfully deleted remotely
     let mut deleted_ids: Vec<String> = Vec::new();
     let mut queued_for_local_commit_ids: Vec<String> = Vec::new();
+    let mut imap_committed_ids = Vec::new();
+    let mut delete_errors = Vec::new();
     // Remote sync: connect once per account, operate, disconnect.
     for (account_id, (provider_type, messages)) in &groups {
         if matches!(provider_type, ProviderType::Pop3) {
@@ -395,79 +457,38 @@ pub async fn batch_delete(
                         }
                     }
                     ConnectedProvider::Imap(imap) => {
-                        if let Ok(trash_folder) =
-                            find_folder_by_role(&state, account_id, FolderRole::Trash)
-                        {
+                        // Discover once before the batch, including when LIST fails.
+                        // Otherwise an unavailable server could stall once per message.
+                        let needs_trash = messages.iter().any(|msg| {
+                            find_message_folder(&state, &msg.id, account_id)
+                                .map(|folder| folder.role != Some(FolderRole::Trash))
+                                .unwrap_or(true)
+                        });
+                        let discovery = if needs_trash {
+                            imap.ensure_trash_folder(&state.store, account_id)
+                                .await
+                                .map(|_| ())
+                        } else {
+                            Ok(())
+                        };
+                        if let Err(error) = discovery {
+                            delete_errors.push(error.to_string());
+                        } else {
                             for msg in messages {
-                                if let Ok(uid) = parse_imap_uid(&msg.remote_id) {
-                                    if let Ok(src) =
-                                        find_message_folder(&state, &msg.id, account_id)
-                                    {
-                                        if src.id != trash_folder.id {
-                                            match imap
-                                                .move_message(
-                                                    &src.remote_id,
-                                                    uid,
-                                                    &trash_folder.remote_id,
-                                                )
-                                                .await
-                                            {
-                                                Ok(_) => deleted_ids.push(msg.id.clone()),
-                                                Err(e) => {
-                                                    warn!(
-                                                        "IMAP batch delete failed for {}: {e}",
-                                                        msg.id
-                                                    );
-                                                    queue_batch_pending_op(
-                                                        &state,
-                                                        msg,
-                                                        "delete",
-                                                        json!({
-                                                            "source_folder_id": src.id,
-                                                            "source_folder_remote_id": src.remote_id,
-                                                            "trash_folder_id": trash_folder.id,
-                                                            "trash_folder_remote_id": trash_folder.remote_id,
-                                                        }),
-                                                        &e.to_string(),
-                                                    )?;
-                                                }
-                                            }
-                                        } else {
-                                            match imap.delete_message(&src.remote_id, uid).await {
-                                                Ok(_) => deleted_ids.push(msg.id.clone()),
-                                                Err(e) => {
-                                                    warn!("IMAP batch permanent delete failed for {}: {e}", msg.id);
-                                                    queue_batch_pending_op(
-                                                        &state,
-                                                        msg,
-                                                        "delete_permanent",
-                                                        json!({
-                                                            "source_folder_id": src.id,
-                                                            "source_folder_remote_id": src.remote_id,
-                                                            "permanent": true,
-                                                        }),
-                                                        &e.to_string(),
-                                                    )?;
-                                                }
-                                            }
+                                match delete_imap_message(&state, imap, msg).await {
+                                    Ok(()) => imap_committed_ids.push(msg.id.clone()),
+                                    Err(error) => {
+                                        warn!("IMAP batch delete failed for {}: {error}", msg.id);
+                                        delete_errors.push(error.to_string());
+                                        // Stop using a failing connection rather than waiting
+                                        // for the command timeout again for every message.
+                                        if matches!(
+                                            error,
+                                            PebbleError::Validation(_) | PebbleError::Network(_)
+                                        ) {
+                                            break;
                                         }
-                                    } else {
-                                        queue_batch_pending_op(
-                                            &state,
-                                            msg,
-                                            "delete",
-                                            json!({ "trash_folder_id": trash_folder.id }),
-                                            "Source folder lookup failed",
-                                        )?;
                                     }
-                                } else {
-                                    queue_batch_pending_op(
-                                        &state,
-                                        msg,
-                                        "delete",
-                                        json!({ "trash_folder_id": trash_folder.id }),
-                                        "Invalid IMAP UID",
-                                    )?;
                                 }
                             }
                         }
@@ -478,14 +499,35 @@ pub async fn batch_delete(
             Err(e) => {
                 let error = e.to_string();
                 for msg in messages {
+                    let source = find_message_folder(&state, &msg.id, account_id).ok();
+                    let permanent = matches!(provider_type, ProviderType::Imap)
+                        && source
+                            .as_ref()
+                            .is_some_and(|folder| folder.role == Some(FolderRole::Trash));
                     queue_batch_pending_op(
                         &state,
                         msg,
-                        "delete",
-                        json!({ "trash": true }),
+                        if permanent {
+                            "delete_permanent"
+                        } else {
+                            "delete"
+                        },
+                        json!({
+                            "trash": !permanent,
+                            "permanent": permanent,
+                            "source_folder_id": source.as_ref().map(|folder| &folder.id),
+                            "source_folder_remote_id": source.as_ref().map(|folder| &folder.remote_id),
+                        }),
                         &error,
                     )?;
-                    queued_for_local_commit_ids.push(msg.id.clone());
+                    // IMAP needs a verified Trash target and destination UID before
+                    // changing local membership. Keep offline failures visible.
+                    if !matches!(provider_type, ProviderType::Imap) {
+                        queued_for_local_commit_ids.push(msg.id.clone());
+                    }
+                }
+                if matches!(provider_type, ProviderType::Imap) {
+                    delete_errors.push(error);
                 }
             }
         }
@@ -499,7 +541,8 @@ pub async fn batch_delete(
 
     // Local bulk soft-delete
     state.store.bulk_soft_delete(&ids_to_delete)?;
-    let success_count = ids_to_delete.len() as u32;
+    let success_count = (ids_to_delete.len() + imap_committed_ids.len()) as u32;
+    refresh_search_documents(&state, &imap_committed_ids)?;
 
     // Update search index: remove deleted messages.
     let delete_ids: Vec<String> = ids_to_delete.clone();
@@ -519,6 +562,11 @@ pub async fn batch_delete(
         success_count,
         message_ids.len()
     );
+    if success_count == 0 {
+        if let Some(error) = delete_errors.first() {
+            return Err(PebbleError::Sync(error.clone()));
+        }
+    }
     Ok(success_count)
 }
 
@@ -821,6 +869,132 @@ pub async fn batch_star(
 mod tests {
     use super::{batch_local_commit_ids, record_remote_success_after_remote_id_update};
     use pebble_core::PebbleError;
+
+    // Reuse the same loopback-only IMAP fixture across crate boundaries.
+    mod imap {
+        pub use pebble_mail::{ConnectionSecurity, ImapConfig};
+    }
+    #[allow(dead_code)]
+    mod fixture {
+        include!("../../../crates/pebble-mail/src/test_imap.rs");
+    }
+
+    fn deletion_state() -> (crate::state::AppState, pebble_core::Message) {
+        let store = pebble_store::Store::open_in_memory().unwrap();
+        store
+            .insert_account(&pebble_core::Account {
+                id: "account".into(),
+                email: "fixture@example.invalid".into(),
+                display_name: "Fixture".into(),
+                account_label: None,
+                provider_display_name: None,
+                color: None,
+                provider: pebble_core::ProviderType::Imap,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        store
+            .insert_folder(&pebble_core::Folder {
+                id: "inbox".into(),
+                account_id: "account".into(),
+                remote_id: "INBOX".into(),
+                name: "Inbox".into(),
+                folder_type: pebble_core::FolderType::Folder,
+                role: Some(pebble_core::FolderRole::Inbox),
+                parent_id: None,
+                color: None,
+                is_system: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let message: pebble_core::Message = serde_json::from_value(serde_json::json!({
+            "id": "message", "account_id": "account", "remote_id": "7",
+            "message_id_header": "<fixture@example.invalid>", "in_reply_to": null,
+            "references_header": null, "thread_id": null, "subject": "Fixture", "snippet": "",
+            "from_address": "fixture@example.invalid", "from_name": "", "to_list": [],
+            "cc_list": [], "bcc_list": [], "body_text": "", "body_html_raw": "",
+            "has_attachments": false, "is_read": false, "is_starred": false, "is_draft": false,
+            "date": 0, "remote_version": null, "is_deleted": false, "deleted_at": null,
+            "created_at": 0, "updated_at": 0,
+        }))
+        .unwrap();
+        store.insert_message(&message, &["inbox".into()]).unwrap();
+        let state = crate::state::AppState::new(
+            store,
+            pebble_search::TantivySearch::open_in_memory().unwrap(),
+            pebble_crypto::CryptoService::from_key([7; 32]),
+            std::sync::mpsc::channel().0,
+            std::env::temp_dir().join(format!("pebble-delete-test-{}", pebble_core::new_id())),
+        );
+        (state, message)
+    }
+
+    #[tokio::test]
+    async fn batch_delete_discovers_trash_and_keeps_destination_uid_visible() {
+        let server = fixture::Server::start(fixture::Behavior::TrashMailbox).await;
+        let imap = pebble_mail::ImapProvider::new(server.config());
+        imap.connect().await.unwrap();
+        let (state, message) = deletion_state();
+        super::delete_imap_message(&state, &imap, &message)
+            .await
+            .unwrap();
+        let trash = state
+            .store
+            .find_folder_by_role("account", pebble_core::FolderRole::Trash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.store.get_message_folder_ids(&message.id).unwrap(),
+            vec![trash.id]
+        );
+        let moved = state.store.get_message(&message.id).unwrap().unwrap();
+        assert_eq!(moved.remote_id, "42");
+        assert!(
+            !moved.is_deleted,
+            "moved message must remain visible and restorable in Trash"
+        );
+        assert!(state
+            .store
+            .list_pending_mail_ops("account")
+            .unwrap()
+            .is_empty());
+        assert_eq!(server.command_count("LIST"), 1);
+        assert_eq!(server.command_count("EXPUNGE"), 0);
+        imap.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_delete_without_server_trash_does_not_delete_or_queue() {
+        let server = fixture::Server::start(fixture::Behavior::NoTrash).await;
+        let imap = pebble_mail::ImapProvider::new(server.config());
+        imap.connect().await.unwrap();
+        let (state, message) = deletion_state();
+        let error = super::delete_imap_message(&state, &imap, &message)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PebbleError::Validation(_)));
+        assert_eq!(
+            state.store.get_message_folder_ids(&message.id).unwrap(),
+            vec!["inbox"]
+        );
+        assert!(
+            !state
+                .store
+                .get_message(&message.id)
+                .unwrap()
+                .unwrap()
+                .is_deleted
+        );
+        assert!(state
+            .store
+            .list_pending_mail_ops("account")
+            .unwrap()
+            .is_empty());
+        assert_eq!(server.command_count("UID"), 0);
+        assert_eq!(server.command_count("EXPUNGE"), 0);
+        imap.disconnect().await.unwrap();
+    }
 
     #[test]
     fn batch_local_commit_ids_include_remote_successes_and_queued_connection_failures_in_request_order(
