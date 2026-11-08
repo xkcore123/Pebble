@@ -533,7 +533,10 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
     };
     let lower = message.to_ascii_lowercase();
 
+    // Windows localizes the message text, so recognize Winsock error codes
+    // even when the English connection-aborted/reset wording is absent.
     lower.contains("os error 10053")
+        || lower.contains("os error 10054")
         || lower.contains("connection reset")
         || lower.contains("connection aborted")
         || lower.contains("broken pipe")
@@ -3225,6 +3228,33 @@ mod tests {
         );
 
         assert!(is_retryable_imap_connection_error(&error));
+    }
+
+    #[test]
+    fn imap_windows_connection_reset_is_retryable_for_polling() {
+        let error = pebble_core::PebbleError::Network(
+            "SELECT failed: io: 远程主机强迫关闭了一个现有的连接。 (os error 10054)"
+                .to_string(),
+        );
+
+        assert!(is_retryable_imap_connection_error(&error));
+    }
+
+    #[test]
+    fn imap_native_windows_connection_reset_is_retryable_for_polling() {
+        let error = pebble_core::PebbleError::Network(format!(
+            "SELECT failed: io: {}",
+            std::io::Error::from_raw_os_error(10054)
+        ));
+
+        assert!(is_retryable_imap_connection_error(&error));
+    }
+
+    #[test]
+    fn imap_authentication_failure_is_not_retryable_as_connection_error() {
+        let error = pebble_core::PebbleError::Auth("Invalid credentials".to_string());
+
+        assert!(!is_retryable_imap_connection_error(&error));
     }
 
     #[test]
