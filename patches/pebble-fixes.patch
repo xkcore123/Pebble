@@ -1865,3 +1865,140 @@ index 5cb9ce37539bd352e01df4f5c86413c118f2185a..742944c81d88c72d3870fc5c5b759ce3
    it("reports a sync error when a sync pass fails", async () => {
      render(<StatusBar />);
  
+diff --git a/src-tauri/src/commands/oauth.rs b/src-tauri/src/commands/oauth.rs
+index 80f4b6266a92e726e1ecc4820ccbf25d619a06b0..28dfb8726290066d17ebfa1e8b347cf1ea2c583d 100644
+--- a/src-tauri/src/commands/oauth.rs
++++ b/src-tauri/src/commands/oauth.rs
+@@ -331,24 +331,42 @@ fn dotenv_lookup_from_str(contents: &str, key: &str) -> Option<String> {
+     None
+ }
+ 
+-fn dotenv_contents() -> Option<String> {
++fn dotenv_candidate_paths(
++    executable: Option<&std::path::Path>,
++    current_dir: Option<&std::path::Path>,
++    manifest_dir: &std::path::Path,
++) -> Vec<std::path::PathBuf> {
+     let mut candidates = Vec::new();
+-    if let Ok(current_dir) = std::env::current_dir() {
++    // Windows startup and file associations need not use the executable's directory
++    // as their working directory. Prefer this installation's runtime configuration.
++    if let Some(executable_dir) = executable.and_then(std::path::Path::parent) {
++        candidates.push(executable_dir.join(".env"));
++    }
++    if let Some(current_dir) = current_dir {
+         candidates.push(current_dir.join(".env"));
+         candidates.push(current_dir.join("..").join(".env"));
+     }
+-    candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"));
+-    candidates.push(
+-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+-            .join("..")
+-            .join(".env"),
+-    );
++    candidates.push(manifest_dir.join(".env"));
++    candidates.push(manifest_dir.join("..").join(".env"));
++    candidates
++}
+ 
++fn dotenv_contents_from_paths(candidates: Vec<std::path::PathBuf>) -> Option<String> {
+     candidates
+         .into_iter()
+         .find_map(|path| std::fs::read_to_string(path).ok())
+ }
+ 
++fn dotenv_contents() -> Option<String> {
++    let executable = std::env::current_exe().ok();
++    let current_dir = std::env::current_dir().ok();
++    dotenv_contents_from_paths(dotenv_candidate_paths(
++        executable.as_deref(),
++        current_dir.as_deref(),
++        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
++    ))
++}
++
+ fn oauth_config_value_from_sources(
+     key: &str,
+     env_value: Option<&str>,
+@@ -1183,6 +1201,81 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn dotenv_autostart_reads_install_config_from_an_unrelated_working_directory() {
++        let temp = std::env::temp_dir().join(format!("pebble-oauth-paths-{}", new_id()));
++        let install = temp.join("install");
++        let startup = temp.join("system32");
++        let manifest = temp.join("source").join("src-tauri");
++        for dir in [&install, &startup, &manifest] {
++            std::fs::create_dir_all(dir).unwrap();
++        }
++        let installed = "MICROSOFT_CLIENT_ID=installed-client\nGOOGLE_CLIENT_ID=installed-google\nGOOGLE_CLIENT_SECRET=installed-secret\n";
++        std::fs::write(install.join(".env"), installed).unwrap();
++        let executable = install.join("pebble.exe");
++        let paths = || dotenv_candidate_paths(Some(&executable), Some(&startup), &manifest);
++
++        // Reproduce Windows startup: no .env in its unrelated working directory.
++        assert_eq!(
++            dotenv_contents_from_paths(paths()).as_deref(),
++            Some(installed)
++        );
++        // An unrelated file must not override this installation's client credentials.
++        std::fs::write(startup.join(".env"), "MICROSOFT_CLIENT_ID=wrong-client").unwrap();
++        let resolved = dotenv_contents_from_paths(paths()).unwrap();
++        assert_eq!(resolved, installed);
++        assert_eq!(
++            oauth_config_value_from_sources(
++                "MICROSOFT_CLIENT_ID",
++                None,
++                Some(&resolved),
++                None,
++                "MICROSOFT_CLIENT_ID_PLACEHOLDER",
++            ),
++            "installed-client"
++        );
++        // Existing explicit process overrides still take precedence.
++        assert_eq!(
++            oauth_config_value_from_sources(
++                "MICROSOFT_CLIENT_ID",
++                Some("process-client"),
++                Some(&resolved),
++                None,
++                "MICROSOFT_CLIENT_ID_PLACEHOLDER",
++            ),
++            "process-client"
++        );
++        std::fs::remove_dir_all(temp).unwrap();
++    }
++
++    #[test]
++    fn dotenv_keeps_development_fallbacks_when_install_config_is_absent() {
++        let temp = std::env::temp_dir().join(format!("pebble-oauth-fallbacks-{}", new_id()));
++        let current_dir = temp.join("work");
++        let manifest = temp.join("source").join("src-tauri");
++        std::fs::create_dir_all(&current_dir).unwrap();
++        std::fs::create_dir_all(&manifest).unwrap();
++        let executable = temp.join("install").join("pebble.exe");
++        let paths = || dotenv_candidate_paths(Some(&executable), Some(&current_dir), &manifest);
++        assert!(dotenv_contents_from_paths(paths()).is_none());
++        std::fs::write(manifest.join(".env"), "from-manifest").unwrap();
++        assert_eq!(
++            dotenv_contents_from_paths(paths()).as_deref(),
++            Some("from-manifest")
++        );
++        std::fs::write(current_dir.join(".env"), "from-workdir").unwrap();
++        assert_eq!(
++            dotenv_contents_from_paths(paths()).as_deref(),
++            Some("from-workdir")
++        );
++        // Failed executable/current-directory discovery must remain non-fatal.
++        assert_eq!(
++            dotenv_contents_from_paths(dotenv_candidate_paths(None, None, &manifest)).as_deref(),
++            Some("from-manifest")
++        );
++        std::fs::remove_dir_all(temp).unwrap();
++    }
++
+     #[test]
+     fn dotenv_lookup_reads_unquoted_and_quoted_values() {
+         let dotenv = r#"

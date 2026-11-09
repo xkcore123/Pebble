@@ -2,7 +2,7 @@
   "base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "f298d4ef077332f25d04a73180421157a2c921993d5d342fb156a2734beefb52",
+  "sha256": "39f26ad93aee9d071149ecf8b34e2f2ad696472811697d9f2d687adae95dd5b9",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
@@ -10,6 +10,7 @@
     "crates/pebble-mail/src/test_imap.rs",
     "src-tauri/src/commands/batch.rs",
     "src-tauri/src/commands/messages/lifecycle.rs",
+    "src-tauri/src/commands/oauth.rs",
     "src-tauri/src/commands/pending_mail_ops.rs",
     "src/components/MessageList.tsx",
     "src/components/StatusBar.tsx",
@@ -17,5 +18,15 @@
     "src/locales/zh.json",
     "tests/components/MessageList.test.tsx",
     "tests/components/StatusBar.realtime.test.tsx"
+  ],
+  "supplemental_fixes": [
+    {
+      "date": "2026-11-10",
+      "based_on_commit": "d5ac00b197c794484c070bb3adf8af43aecf848f",
+      "files": [
+        "src-tauri/src/commands/oauth.rs"
+      ],
+      "description": "Resolve OAuth .env beside the executable before working-directory fallbacks so autostart and file-association launches use the installed client configuration; regression tests cover unrelated/missing working directories and existing overrides."
+    }
   ]
 }
