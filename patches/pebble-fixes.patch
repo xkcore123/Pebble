@@ -451,7 +451,7 @@ index 83304f69010447d4568a8492ec989f84a747ef66..2a11c9ea968430b49517898d64bd8b10
  pub use imap::{ConnectionSecurity, ImapConfig, ImapProvider, ProxyConfig, SmtpConfig};
  pub use outlook_sync::OutlookSyncWorker;
 diff --git a/crates/pebble-mail/src/sync.rs b/crates/pebble-mail/src/sync.rs
-index 89e991273a3a2945c4c9a22608886e4a6c0127ef..e9e179d764c84323bde4a84b4c01352057d067b2 100644
+index 89e991273a3a2945c4c9a22608886e4a6c0127ef..e34d91e4f120a134e75110b05928d58de428178f 100644
 --- a/crates/pebble-mail/src/sync.rs
 +++ b/crates/pebble-mail/src/sync.rs
 @@ -533,12 +533,17 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
@@ -715,7 +715,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..e9e179d764c84323bde4a84b4c013520
                              } else {
                                  self.poll_new_messages().await
                              };
-@@ -2434,43 +2503,21 @@ impl SyncWorker {
+@@ -2434,42 +2503,20 @@ impl SyncWorker {
                      }
                  }
                  _ = reconcile_ticker.tick() => {
@@ -750,27 +750,26 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..e9e179d764c84323bde4a84b4c013520
 -                            self.base.emit_error("reconcile", &format!("List folders error: {}", e));
 -                            self.base.emit_sync_error("reconcile", &e.to_string());
 -                            continue;
--                        }
++                            warn!("Full reconcile failed for account {}: {}; scheduling retry", self.base.account_id, e);
++                            let delay = reconcile_backoff.record_failure();
++                            reconcile_ticker.reset_after(delay.min(reconcile_interval));
+                         }
 -                    };
 -                    for folder in &folders {
 -                        if let Err(e) = self.reconcile_folder(folder).await {
 -                            warn!("Reconcile folder {} error: {}", folder.name, e);
 -                            self.base.emit_error("reconcile", &format!("Reconcile {} error: {}", folder.name, e));
 -                            reconcile_failed = true;
-+                            warn!("Full reconcile failed for account {}: {}; scheduling retry", self.base.account_id, e);
-+                            let delay = reconcile_backoff.record_failure();
-+                            reconcile_ticker.reset_after(delay.min(reconcile_interval));
-                         }
-                     }
+-                        }
+-                    }
 -                    if reconcile_failed {
 -                        self.base.emit_sync_error("reconcile", "One or more folders failed to reconcile");
 -                    } else {
 -                        self.base.emit_sync_completed("reconcile");
--                    }
+                     }
                  }
                  Ok(()) = stop_rx.changed() => {
-                     if *stop_rx.borrow() {
-@@ -2495,6 +2542,207 @@ mod tests {
+@@ -2495,6 +2542,210 @@ mod tests {
      use pebble_core::{Folder, FolderRole};
      use std::io::{self, Write};
  
@@ -880,6 +879,8 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..e9e179d764c84323bde4a84b4c013520
 +        assert!(progress.iter().all(|event| event.status != "completed"));
 +        let last = progress.last().unwrap();
 +        assert_eq!((&*last.status, &*last.phase), ("error", "reconcile"));
++        assert_eq!(server.command_count("INJECTED_BYE"), 2);
++        let selects_before_retry = server.command_count("SELECT");
 +
 +        let recovered = tokio::time::timeout(Duration::from_secs(10), worker.reconcile_pass())
 +            .await
@@ -897,7 +898,8 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..e9e179d764c84323bde4a84b4c013520
 +            ["started", "completed"]
 +        );
 +        assert!(progress.iter().all(|event| event.phase == "reconcile"));
-+        assert_eq!(server.login_count(), 3);
++        assert!(server.command_count("SELECT") > selects_before_retry);
++        assert!(server.login_count() >= 2);
 +    }
 +
 +    #[tokio::test]
@@ -978,7 +980,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..e9e179d764c84323bde4a84b4c013520
      struct FailingAttachmentWriter {
          fail_write: bool,
          fail_flush: bool,
-@@ -3227,6 +3475,32 @@ mod tests {
+@@ -3227,6 +3478,32 @@ mod tests {
          assert!(is_retryable_imap_connection_error(&error));
      }
  
@@ -2434,11 +2436,12 @@ index ee3d4fb01e522ff982674cd2fce00ef6c6c0ee04..d22c6a14c06f4db4684df883f91c12b1
      render(<AccountsTab />);
 diff --git a/crates/pebble-mail/src/test_imap.rs b/crates/pebble-mail/src/test_imap.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..372b5ef90cce530c18f91cd85fdc456b3dcaf186
+index 0000000000000000000000000000000000000000..4c73b5595224ca94395ca2a7c4e8104d4840f07d
 --- /dev/null
 +++ b/crates/pebble-mail/src/test_imap.rs
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,183 @@
 +// Local, credential-free IMAP fixtures for connection and deletion regressions.
++use std::sync::atomic::{AtomicUsize, Ordering};
 +use std::sync::{Arc, Mutex};
 +
 +use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2484,6 +2487,7 @@ index 0000000000000000000000000000000000000000..372b5ef90cce530c18f91cd85fdc456b
 +        let port = listener.local_addr().unwrap().port();
 +        let commands = Arc::new(Mutex::new(Vec::new()));
 +        let recorded = Arc::clone(&commands);
++        let select_failures = Arc::new(AtomicUsize::new(0));
 +        let task = tokio::spawn(async move {
 +            let mut clients = JoinSet::new();
 +            let mut connection = 0;
@@ -2492,6 +2496,7 @@ index 0000000000000000000000000000000000000000..372b5ef90cce530c18f91cd85fdc456b
 +                let index = connection;
 +                connection += 1;
 +                let recorded = Arc::clone(&recorded);
++                let select_failures = Arc::clone(&select_failures);
 +                clients.spawn(async move {
 +                    let mut stream = BufReader::new(socket);
 +                    stream.get_mut().write_all(b"* OK Test IMAP ready\r\n").await.unwrap();
@@ -2537,7 +2542,8 @@ index 0000000000000000000000000000000000000000..372b5ef90cce530c18f91cd85fdc456b
 +                        } else if command == "SELECT" {
 +                            selected = words.next().unwrap_or("").trim_matches('"').to_string();
 +                            match behavior {
-+                                Behavior::ByeTwiceThenEmpty if index < 2 => {
++                                Behavior::ByeTwiceThenEmpty if select_failures.fetch_add(1, Ordering::SeqCst) < 2 => {
++                                    recorded.lock().unwrap().push("INJECTED_BYE".into());
 +                                    stream.get_mut().write_all(b"* BYE problems with connection\r\n").await.unwrap();
 +                                    break;
 +                                }

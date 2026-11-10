@@ -2,7 +2,7 @@
   "base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "fbfd513a22e9dafc16479bd54568a032f24401e3189f647fc0bc0a54f74aaa6a",
+  "sha256": "8771966a95e3d5e53590c8dde945fe737ab0c8b38bc9c09856c6538159d4c8fa",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
@@ -39,7 +39,8 @@
         "src-tauri/src/commands/sync_cmd.rs",
         "tests/features/settings/AccountsTab.imap-folders.test.tsx"
       ],
-      "description": "Publish ordered account health recovery after successful sync passes; retain full-reconcile failures across Inbox-only success; retry failed full reconciliation with independent capped backoff and make manual sync a full pass. Add double-BYE recovery and account-status regressions."
+      "description": "Publish ordered account health recovery after successful sync passes; retain full-reconcile failures across Inbox-only success; retry failed full reconciliation with independent capped backoff and make manual sync a full pass. Add double-BYE recovery and account-status regressions.",
+      "validation_note": "Double-BYE fixture counts actual SELECT failures rather than platform-dependent accepted TCP connections; recovery assertions verify subsequent SELECT completion."
     }
   ]
 }
