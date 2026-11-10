@@ -451,7 +451,7 @@ index 83304f69010447d4568a8492ec989f84a747ef66..2a11c9ea968430b49517898d64bd8b10
  pub use imap::{ConnectionSecurity, ImapConfig, ImapProvider, ProxyConfig, SmtpConfig};
  pub use outlook_sync::OutlookSyncWorker;
 diff --git a/crates/pebble-mail/src/sync.rs b/crates/pebble-mail/src/sync.rs
-index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f654bc40b 100644
+index 89e991273a3a2945c4c9a22608886e4a6c0127ef..e9e179d764c84323bde4a84b4c01352057d067b2 100644
 --- a/crates/pebble-mail/src/sync.rs
 +++ b/crates/pebble-mail/src/sync.rs
 @@ -533,12 +533,17 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
@@ -472,7 +472,30 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
          || lower.contains("tls close_notify")
          || lower.contains("unexpected eof")
          || lower.contains("unexpected-eof")
-@@ -1712,19 +1717,19 @@ impl SyncWorker {
+@@ -715,6 +720,10 @@ pub(crate) struct SyncWorkerBase {
+ impl SyncWorkerBase {
+     /// Emit a structured error through the error channel.
+     pub(crate) fn emit_error(&self, error_type: &str, message: &str) {
++        // Keep failures and later successful passes in one ordered channel.
++        // Separate error/progress receiver tasks can otherwise replay a stale
++        // error after the recovery has already completed.
++        self.emit_sync_error(error_type, message);
+         if let Some(tx) = &self.error_tx {
+             let _ = tx.send(SyncError {
+                 error_type: error_type.to_string(),
+@@ -1691,11 +1700,6 @@ impl SyncWorker {
+             .await
+     }
+ 
+-    async fn poll_all_new_messages(&self, phase: &str) -> Result<()> {
+-        self.poll_new_messages_for_scope(phase, ImapPollScope::Full)
+-            .await
+-    }
+-
+     async fn poll_new_messages_for_scope(&self, phase: &str, scope: ImapPollScope) -> Result<()> {
+         self.base.emit_sync_started(phase);
+         let result = self.poll_new_messages_inner(scope).await;
+@@ -1712,19 +1716,19 @@ impl SyncWorker {
              return Ok(());
          }
  
@@ -496,7 +519,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
              return Err(e);
          }
  
-@@ -1737,7 +1742,10 @@ impl SyncWorker {
+@@ -1737,7 +1741,10 @@ impl SyncWorker {
      ) -> Option<PebbleError> {
          match self.poll_imap_folder_once(folder).await {
              Ok(()) => None,
@@ -508,7 +531,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
                  debug!(
                      "Skipping unavailable IMAP folder {} ({}) for account {}: {}",
                      folder.name, folder.remote_id, self.base.account_id, e
-@@ -1764,9 +1772,7 @@ impl SyncWorker {
+@@ -1764,9 +1771,7 @@ impl SyncWorker {
                                      folder.name, retry_error
                                  ),
                              );
@@ -519,7 +542,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
                          }
                          None
                      }
-@@ -1788,7 +1794,7 @@ impl SyncWorker {
+@@ -1788,7 +1793,7 @@ impl SyncWorker {
                      "poll",
                      &format!("Poll failed for folder {}: {}", folder.name, e),
                  );
@@ -528,7 +551,48 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
              }
          }
      }
-@@ -1847,7 +1853,10 @@ impl SyncWorker {
+@@ -1837,6 +1842,40 @@ impl SyncWorker {
+         Ok(())
+     }
+ 
++    /// A full pass must report recovery only after every selected folder succeeds.
++    async fn reconcile_pass(&self) -> Result<()> {
++        self.base.emit_sync_started("reconcile");
++        let result = self.reconcile_all_folders().await;
++        match &result {
++            Ok(()) => self.base.emit_sync_completed("reconcile"),
++            Err(e) => self
++                .base
++                .emit_error("reconcile", &format!("Reconcile failed: {e}")),
++        }
++        result
++    }
++
++    async fn reconcile_all_folders(&self) -> Result<()> {
++        self.poll_new_messages_inner(ImapPollScope::Full).await?;
++        let folders = self.base.store.list_folders(&self.base.account_id)?;
++        let mut first_error = None;
++        for folder in &folders {
++            if let Err(e) = self.reconcile_folder(folder).await {
++                warn!(
++                    "Reconcile folder {} failed for account {}: {}",
++                    folder.name, self.base.account_id, e
++                );
++                if first_error.is_none() {
++                    first_error = Some(e);
++                }
++            }
++        }
++        match first_error {
++            Some(error) => Err(error),
++            None => Ok(()),
++        }
++    }
++
+     /// Reconcile a folder: detect flag changes and server-side deletions.
+     ///
+     /// When the server supports CONDSTORE (RFC 4551), this method first checks
+@@ -1847,7 +1886,10 @@ impl SyncWorker {
      async fn reconcile_folder(&self, folder: &pebble_core::Folder) -> Result<()> {
          match self.reconcile_folder_once(folder).await {
              Ok(()) => Ok(()),
@@ -540,7 +604,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
                  debug!(
                      "Skipping unavailable IMAP folder {} ({}) during reconcile for account {}: {}",
                      folder.name, folder.remote_id, self.base.account_id, e
-@@ -2036,21 +2045,9 @@ impl SyncWorker {
+@@ -2036,21 +2078,9 @@ impl SyncWorker {
                      break;
                  }
  
@@ -565,7 +629,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
                  if !connected {
                      match idle_provider.connect().await {
                          Ok(()) => {
-@@ -2122,21 +2119,59 @@ impl SyncWorker {
+@@ -2122,21 +2152,59 @@ impl SyncWorker {
          })
      }
  
@@ -634,7 +698,79 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
              return;
          }
  
-@@ -2495,6 +2530,160 @@ mod tests {
+@@ -2203,6 +2271,7 @@ impl SyncWorker {
+         let mut stop_rx = self.stop_rx.clone();
+         let mut last_exists: Option<crate::idle::MailboxUidState> = None;
+         let mut backoff = SyncBackoff::new();
++        let mut reconcile_backoff = SyncBackoff::new();
+         let mut trigger_rx = trigger_rx;
+         let mut runtime = RealtimeRuntimeState::new(Duration::from_secs(60), Instant::now());
+         let (idle_trigger_tx, mut idle_trigger_rx) = mpsc::unbounded_channel();
+@@ -2412,7 +2481,7 @@ impl SyncWorker {
+                                 continue;
+                             }
+                             let poll_result = if trigger == SyncTrigger::Manual {
+-                                self.poll_all_new_messages("manual").await
++                                self.reconcile_pass().await
+                             } else {
+                                 self.poll_new_messages().await
+                             };
+@@ -2434,43 +2503,21 @@ impl SyncWorker {
+                     }
+                 }
+                 _ = reconcile_ticker.tick() => {
+-                    // Full reconcile: poll new messages + flag diff + deletion detection
+-                    self.base.emit_sync_started("reconcile");
+-                    let mut reconcile_failed = false;
+-                    if let Err(e) = self.poll_new_messages_inner(ImapPollScope::Full).await {
+-                        warn!("Reconcile poll error for account {}: {}", self.base.account_id, e);
+-                        self.base.emit_error("reconcile", &format!("Reconcile poll error: {}", e));
+-                        self.base.emit_sync_error("reconcile", &e.to_string());
+-                        backoff.record_failure();
+-                        continue;
+-                    } else {
+-                        backoff.record_success();
+-                        if !idle_watcher_active {
+-                            polling_baseline_trusted =
+-                                self.refresh_inbox_local_uid_baseline(&mut last_exists);
++                    match self.reconcile_pass().await {
++                        Ok(()) => {
++                            reconcile_backoff.record_success();
++                            reconcile_ticker.reset_after(reconcile_interval);
++                            if !idle_watcher_active {
++                                polling_baseline_trusted =
++                                    self.refresh_inbox_local_uid_baseline(&mut last_exists);
++                            }
+                         }
+-                    }
+-                    let folders = match self.base.store.list_folders(&self.base.account_id) {
+-                        Ok(f) => f,
+                         Err(e) => {
+-                            warn!("Reconcile list folders error: {}", e);
+-                            self.base.emit_error("reconcile", &format!("List folders error: {}", e));
+-                            self.base.emit_sync_error("reconcile", &e.to_string());
+-                            continue;
+-                        }
+-                    };
+-                    for folder in &folders {
+-                        if let Err(e) = self.reconcile_folder(folder).await {
+-                            warn!("Reconcile folder {} error: {}", folder.name, e);
+-                            self.base.emit_error("reconcile", &format!("Reconcile {} error: {}", folder.name, e));
+-                            reconcile_failed = true;
++                            warn!("Full reconcile failed for account {}: {}; scheduling retry", self.base.account_id, e);
++                            let delay = reconcile_backoff.record_failure();
++                            reconcile_ticker.reset_after(delay.min(reconcile_interval));
+                         }
+                     }
+-                    if reconcile_failed {
+-                        self.base.emit_sync_error("reconcile", "One or more folders failed to reconcile");
+-                    } else {
+-                        self.base.emit_sync_completed("reconcile");
+-                    }
+                 }
+                 Ok(()) = stop_rx.changed() => {
+                     if *stop_rx.borrow() {
+@@ -2495,6 +2542,207 @@ mod tests {
      use pebble_core::{Folder, FolderRole};
      use std::io::{self, Write};
  
@@ -664,7 +800,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
 +        let (result, statuses, logins) =
 +            poll_against_fixture(crate::test_imap::Behavior::SelectDenied).await;
 +        assert!(result.is_err());
-+        assert_eq!(statuses, ["started", "error"]);
++        assert_eq!(statuses, ["started", "error", "error"]);
 +        assert_eq!(logins, 1, "permission errors must not trigger reconnects");
 +    }
 +
@@ -673,7 +809,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
 +        let (result, statuses, _) =
 +            poll_against_fixture(crate::test_imap::Behavior::MissingInbox).await;
 +        assert!(result.is_err());
-+        assert_eq!(statuses, ["started", "error"]);
++        assert_eq!(statuses, ["started", "error", "error"]);
 +    }
 +
 +    #[tokio::test]
@@ -690,7 +826,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
 +        let (result, statuses, logins) =
 +            poll_against_fixture(crate::test_imap::Behavior::ByeThenDenied).await;
 +        assert!(result.is_err());
-+        assert_eq!(statuses, ["started", "error"]);
++        assert_eq!(statuses, ["started", "error", "error"]);
 +        assert_eq!(logins, 2, "retry must be bounded");
 +    }
 +
@@ -715,6 +851,53 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
 +        .expect("startup should recover after backoff");
 +        assert!(connected);
 +        assert_eq!(server.login_count(), 2);
++    }
++
++    #[tokio::test]
++    async fn full_reconcile_reports_failure_then_real_recovery_in_order() {
++        let server =
++            crate::test_imap::Server::start(crate::test_imap::Behavior::ByeTwiceThenEmpty).await;
++        let provider = Arc::new(ImapMailProvider::new(server.config()));
++        provider.connect().await.unwrap();
++        let (_stop_tx, stop_rx) = watch::channel(false);
++        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
++        let worker = SyncWorker::new(
++            "account-1",
++            provider,
++            test_store_with_message("recovery"),
++            stop_rx,
++            std::env::temp_dir(),
++        )
++        .with_progress_tx(progress_tx);
++        let failed = tokio::time::timeout(Duration::from_secs(10), worker.reconcile_pass())
++            .await
++            .unwrap();
++        assert!(failed.is_err());
++        let mut progress = Vec::new();
++        while let Ok(event) = progress_rx.try_recv() {
++            progress.push(event);
++        }
++        assert!(progress.iter().all(|event| event.status != "completed"));
++        let last = progress.last().unwrap();
++        assert_eq!((&*last.status, &*last.phase), ("error", "reconcile"));
++
++        let recovered = tokio::time::timeout(Duration::from_secs(10), worker.reconcile_pass())
++            .await
++            .unwrap();
++        assert!(recovered.is_ok(), "{recovered:?}");
++        let mut progress = Vec::new();
++        while let Ok(event) = progress_rx.try_recv() {
++            progress.push(event);
++        }
++        assert_eq!(
++            progress
++                .iter()
++                .map(|event| event.status.as_str())
++                .collect::<Vec<_>>(),
++            ["started", "completed"]
++        );
++        assert!(progress.iter().all(|event| event.phase == "reconcile"));
++        assert_eq!(server.login_count(), 3);
 +    }
 +
 +    #[tokio::test]
@@ -795,7 +978,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
      struct FailingAttachmentWriter {
          fail_write: bool,
          fail_flush: bool,
-@@ -3227,6 +3416,32 @@ mod tests {
+@@ -3227,6 +3475,32 @@ mod tests {
          assert!(is_retryable_imap_connection_error(&error));
      }
  
@@ -828,186 +1011,6 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..ea46d31d8c7c1a5e855b7ffe1f5b723f
      #[test]
      fn imap_rustls_unexpected_eof_is_retryable_for_polling() {
          let error = pebble_core::PebbleError::Network(
-diff --git a/crates/pebble-mail/src/test_imap.rs b/crates/pebble-mail/src/test_imap.rs
-new file mode 100644
-index 0000000000000000000000000000000000000000..f6d9b8c26cecc03ccc8060f17bb497bc848923f5
---- /dev/null
-+++ b/crates/pebble-mail/src/test_imap.rs
-@@ -0,0 +1,174 @@
-+// Local, credential-free IMAP fixtures for connection and deletion regressions.
-+use std::sync::{Arc, Mutex};
-+
-+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-+use tokio::net::TcpListener;
-+use tokio::task::{JoinHandle, JoinSet};
-+
-+use super::imap::{ConnectionSecurity, ImapConfig};
-+
-+#[derive(Clone, Copy)]
-+pub(crate) enum Behavior {
-+    SelectDenied,
-+    MissingInbox,
-+    ByeThenEmpty,
-+    ByeThenDenied,
-+    SilentDone,
-+    SilentLogout,
-+    DropFirstLogin,
-+    RejectLogin,
-+    TrashMailbox,
-+    NoTrash,
-+    ListDenied,
-+    PartialListDenied,
-+    SilentList,
-+    SilentListCollect,
-+}
-+
-+pub(crate) struct Server {
-+    port: u16,
-+    commands: Arc<Mutex<Vec<String>>>,
-+    task: JoinHandle<()>,
-+}
-+
-+impl Drop for Server {
-+    fn drop(&mut self) {
-+        self.task.abort();
-+    }
-+}
-+
-+impl Server {
-+    pub(crate) async fn start(behavior: Behavior) -> Self {
-+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-+        let port = listener.local_addr().unwrap().port();
-+        let commands = Arc::new(Mutex::new(Vec::new()));
-+        let recorded = Arc::clone(&commands);
-+        let task = tokio::spawn(async move {
-+            let mut clients = JoinSet::new();
-+            let mut connection = 0;
-+            loop {
-+                let (socket, _) = listener.accept().await.unwrap();
-+                let index = connection;
-+                connection += 1;
-+                let recorded = Arc::clone(&recorded);
-+                clients.spawn(async move {
-+                    let mut stream = BufReader::new(socket);
-+                    stream.get_mut().write_all(b"* OK Test IMAP ready\r\n").await.unwrap();
-+                    let mut idle_tag = String::new();
-+                    let mut selected = String::new();
-+                    let mut moved = false;
-+                    loop {
-+                        let mut line = String::new();
-+                        if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
-+                            break;
-+                        }
-+                        let mut words = line.split_whitespace();
-+                        let tag = words.next().unwrap().to_string();
-+                        let command = words.next().unwrap_or("").to_ascii_uppercase();
-+                        // Never record LOGIN arguments, even in test fixtures.
-+                        recorded.lock().unwrap().push(command.clone());
-+                        let reply = if tag == "DONE" {
-+                            if matches!(behavior, Behavior::SilentDone) {
-+                                std::future::pending::<()>().await;
-+                            }
-+                            format!("{idle_tag} OK IDLE completed\r\n")
-+                        } else if command == "LOGIN" {
-+                            if matches!(behavior, Behavior::DropFirstLogin) && index == 0 {
-+                                break;
-+                            }
-+                            if matches!(behavior, Behavior::RejectLogin) {
-+                                stream.get_mut().write_all(format!("{tag} NO Invalid credentials\r\n").as_bytes()).await.unwrap();
-+                                break;
-+                            }
-+                            format!("{tag} OK LOGIN completed\r\n")
-+                        } else if command == "LIST" {
-+                            match behavior {
-+                                Behavior::SilentList => std::future::pending::<String>().await,
-+                                Behavior::SilentListCollect => {
-+                                    stream.get_mut().write_all(b"* LIST () \"/\" \"INBOX\"\r\n").await.unwrap();
-+                                    std::future::pending::<String>().await
-+                                }
-+                                Behavior::PartialListDenied => format!("* LIST (\\Trash) \"/\" \"Trash\"\r\n{tag} NO LIST denied\r\n"),
-+                                Behavior::ListDenied => format!("{tag} NO LIST denied\r\n"),
-+                                Behavior::TrashMailbox => format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"&XfJSIJZk-\"\r\n{tag} OK LIST completed\r\n"),
-+                                _ => format!("* LIST () \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n"),
-+                            }
-+                        } else if command == "SELECT" {
-+                            selected = words.next().unwrap_or("").trim_matches('"').to_string();
-+                            match behavior {
-+                                Behavior::ByeThenEmpty | Behavior::ByeThenDenied if index == 0 => {
-+                                    stream.get_mut().write_all(b"* BYE problems with connection\r\n").await.unwrap();
-+                                    break;
-+                                }
-+                                Behavior::SelectDenied | Behavior::ByeThenDenied => {
-+                                    format!("{tag} NO [NOPERM] Permission denied\r\n")
-+                                }
-+                                Behavior::MissingInbox => format!("{tag} NO SELECT Folder not exist\r\n"),
-+                                _ => format!("* FLAGS (\\Seen)\r\n* 0 EXISTS\r\n* OK [UIDVALIDITY 42] UIDs valid\r\n* OK [UIDNEXT 1] Next UID\r\n{tag} OK [READ-WRITE] SELECT completed\r\n"),
-+                            }
-+                        } else if command == "UID" {
-+                            match words.next().unwrap_or("").to_ascii_uppercase().as_str() {
-+                                "SEARCH" => {
-+                                    let uid = if selected == "&XfJSIJZk-" && moved {
-+                                        " 42"
-+                                    } else if selected == "INBOX" && !moved {
-+                                        " 7"
-+                                    } else { "" };
-+                                    format!("* SEARCH{uid}\r\n{tag} OK SEARCH completed\r\n")
-+                                }
-+                                "MOVE" => {
-+                                    moved = true;
-+                                    format!("{tag} OK MOVE completed\r\n")
-+                                }
-+                                _ => format!("{tag} OK completed\r\n"),
-+                            }
-+                        } else if command == "IDLE" {
-+                            idle_tag = tag;
-+                            "+ idling\r\n".to_string()
-+                        } else if command == "LOGOUT" {
-+                            if matches!(behavior, Behavior::SilentLogout) {
-+                                std::future::pending::<()>().await;
-+                            }
-+                            format!("* BYE logging out\r\n{tag} OK LOGOUT completed\r\n")
-+                        } else {
-+                            format!("{tag} OK completed\r\n")
-+                        };
-+                        if stream.get_mut().write_all(reply.as_bytes()).await.is_err() {
-+                            break;
-+                        }
-+                    }
-+                });
-+            }
-+        });
-+        Self {
-+            port,
-+            commands,
-+            task,
-+        }
-+    }
-+
-+    pub(crate) fn config(&self) -> ImapConfig {
-+        ImapConfig {
-+            host: "127.0.0.1".to_string(),
-+            port: self.port,
-+            username: "fixture-user".to_string(),
-+            password: "fixture-password".to_string(),
-+            security: ConnectionSecurity::Plain,
-+            accept_invalid_certs: false,
-+            proxy: None,
-+        }
-+    }
-+
-+    pub(crate) fn login_count(&self) -> usize {
-+        self.command_count("LOGIN")
-+    }
-+
-+    pub(crate) fn command_count(&self, command: &str) -> usize {
-+        self.commands
-+            .lock()
-+            .unwrap()
-+            .iter()
-+            .filter(|cmd| cmd.as_str() == command)
-+            .count()
-+    }
-+}
 diff --git a/src-tauri/src/commands/batch.rs b/src-tauri/src/commands/batch.rs
 index ceefc26fa2f6f834a6f0d20c3ba8c7284e9078b5..f39a826fb6c922a1472c6c3e4766d135334aca1f 100644
 --- a/src-tauri/src/commands/batch.rs
@@ -1469,6 +1472,143 @@ index b575e7b05e5c4bef4dc4646906e3fde50e4e3980..7c0f133d783ea85dc4b2751998f14238
                          let outcome = queue_remote_op(
                              &state,
                              &msg,
+diff --git a/src-tauri/src/commands/oauth.rs b/src-tauri/src/commands/oauth.rs
+index 80f4b6266a92e726e1ecc4820ccbf25d619a06b0..28dfb8726290066d17ebfa1e8b347cf1ea2c583d 100644
+--- a/src-tauri/src/commands/oauth.rs
++++ b/src-tauri/src/commands/oauth.rs
+@@ -331,24 +331,42 @@ fn dotenv_lookup_from_str(contents: &str, key: &str) -> Option<String> {
+     None
+ }
+ 
+-fn dotenv_contents() -> Option<String> {
++fn dotenv_candidate_paths(
++    executable: Option<&std::path::Path>,
++    current_dir: Option<&std::path::Path>,
++    manifest_dir: &std::path::Path,
++) -> Vec<std::path::PathBuf> {
+     let mut candidates = Vec::new();
+-    if let Ok(current_dir) = std::env::current_dir() {
++    // Windows startup and file associations need not use the executable's directory
++    // as their working directory. Prefer this installation's runtime configuration.
++    if let Some(executable_dir) = executable.and_then(std::path::Path::parent) {
++        candidates.push(executable_dir.join(".env"));
++    }
++    if let Some(current_dir) = current_dir {
+         candidates.push(current_dir.join(".env"));
+         candidates.push(current_dir.join("..").join(".env"));
+     }
+-    candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"));
+-    candidates.push(
+-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+-            .join("..")
+-            .join(".env"),
+-    );
++    candidates.push(manifest_dir.join(".env"));
++    candidates.push(manifest_dir.join("..").join(".env"));
++    candidates
++}
+ 
++fn dotenv_contents_from_paths(candidates: Vec<std::path::PathBuf>) -> Option<String> {
+     candidates
+         .into_iter()
+         .find_map(|path| std::fs::read_to_string(path).ok())
+ }
+ 
++fn dotenv_contents() -> Option<String> {
++    let executable = std::env::current_exe().ok();
++    let current_dir = std::env::current_dir().ok();
++    dotenv_contents_from_paths(dotenv_candidate_paths(
++        executable.as_deref(),
++        current_dir.as_deref(),
++        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
++    ))
++}
++
+ fn oauth_config_value_from_sources(
+     key: &str,
+     env_value: Option<&str>,
+@@ -1183,6 +1201,81 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn dotenv_autostart_reads_install_config_from_an_unrelated_working_directory() {
++        let temp = std::env::temp_dir().join(format!("pebble-oauth-paths-{}", new_id()));
++        let install = temp.join("install");
++        let startup = temp.join("system32");
++        let manifest = temp.join("source").join("src-tauri");
++        for dir in [&install, &startup, &manifest] {
++            std::fs::create_dir_all(dir).unwrap();
++        }
++        let installed = "MICROSOFT_CLIENT_ID=installed-client\nGOOGLE_CLIENT_ID=installed-google\nGOOGLE_CLIENT_SECRET=installed-secret\n";
++        std::fs::write(install.join(".env"), installed).unwrap();
++        let executable = install.join("pebble.exe");
++        let paths = || dotenv_candidate_paths(Some(&executable), Some(&startup), &manifest);
++
++        // Reproduce Windows startup: no .env in its unrelated working directory.
++        assert_eq!(
++            dotenv_contents_from_paths(paths()).as_deref(),
++            Some(installed)
++        );
++        // An unrelated file must not override this installation's client credentials.
++        std::fs::write(startup.join(".env"), "MICROSOFT_CLIENT_ID=wrong-client").unwrap();
++        let resolved = dotenv_contents_from_paths(paths()).unwrap();
++        assert_eq!(resolved, installed);
++        assert_eq!(
++            oauth_config_value_from_sources(
++                "MICROSOFT_CLIENT_ID",
++                None,
++                Some(&resolved),
++                None,
++                "MICROSOFT_CLIENT_ID_PLACEHOLDER",
++            ),
++            "installed-client"
++        );
++        // Existing explicit process overrides still take precedence.
++        assert_eq!(
++            oauth_config_value_from_sources(
++                "MICROSOFT_CLIENT_ID",
++                Some("process-client"),
++                Some(&resolved),
++                None,
++                "MICROSOFT_CLIENT_ID_PLACEHOLDER",
++            ),
++            "process-client"
++        );
++        std::fs::remove_dir_all(temp).unwrap();
++    }
++
++    #[test]
++    fn dotenv_keeps_development_fallbacks_when_install_config_is_absent() {
++        let temp = std::env::temp_dir().join(format!("pebble-oauth-fallbacks-{}", new_id()));
++        let current_dir = temp.join("work");
++        let manifest = temp.join("source").join("src-tauri");
++        std::fs::create_dir_all(&current_dir).unwrap();
++        std::fs::create_dir_all(&manifest).unwrap();
++        let executable = temp.join("install").join("pebble.exe");
++        let paths = || dotenv_candidate_paths(Some(&executable), Some(&current_dir), &manifest);
++        assert!(dotenv_contents_from_paths(paths()).is_none());
++        std::fs::write(manifest.join(".env"), "from-manifest").unwrap();
++        assert_eq!(
++            dotenv_contents_from_paths(paths()).as_deref(),
++            Some("from-manifest")
++        );
++        std::fs::write(current_dir.join(".env"), "from-workdir").unwrap();
++        assert_eq!(
++            dotenv_contents_from_paths(paths()).as_deref(),
++            Some("from-workdir")
++        );
++        // Failed executable/current-directory discovery must remain non-fatal.
++        assert_eq!(
++            dotenv_contents_from_paths(dotenv_candidate_paths(None, None, &manifest)).as_deref(),
++            Some("from-manifest")
++        );
++        std::fs::remove_dir_all(temp).unwrap();
++    }
++
+     #[test]
+     fn dotenv_lookup_reads_unquoted_and_quoted_values() {
+         let dotenv = r#"
 diff --git a/src-tauri/src/commands/pending_mail_ops.rs b/src-tauri/src/commands/pending_mail_ops.rs
 index ae21035c839e3289938c7cbf05cb3337cc3b5070..edda1b01705a9f1df1e5b39f17323e0b8f5e45a9 100644
 --- a/src-tauri/src/commands/pending_mail_ops.rs
@@ -1574,6 +1714,380 @@ index ae21035c839e3289938c7cbf05cb3337cc3b5070..edda1b01705a9f1df1e5b39f17323e0b
      #[test]
      fn local_commit_replays_archived_pending_op_after_remote_success() {
          let store = Store::open_in_memory().unwrap();
+diff --git a/src-tauri/src/commands/sync_cmd.rs b/src-tauri/src/commands/sync_cmd.rs
+index cd55362c788ce02578df0c3777d5133b67f8bdc4..472307b1cf753f8f87733bc460842ca9c9434f71 100644
+--- a/src-tauri/src/commands/sync_cmd.rs
++++ b/src-tauri/src/commands/sync_cmd.rs
+@@ -176,8 +176,6 @@ async fn start_sync_inner(
+         }
+     };
+ 
+-    let provider_for_errors = account.provider.clone();
+-    let account_id_for_errors = account_id.clone();
+     let store = Arc::clone(&state.store);
+     let attachments_dir = state.attachments_dir.clone();
+     let (stop_tx, stop_rx) = watch::channel(false);
+@@ -188,25 +186,35 @@ async fn start_sync_inner(
+     tokio::spawn(async move {
+         while let Some(sync_error) = error_rx.recv().await {
+             let _ = app_handle.emit(events::MAIL_ERROR, &sync_error);
+-            emit_realtime_status(
+-                &app_handle,
+-                realtime_status_payload(
+-                    &account_id_for_errors,
+-                    &provider_for_errors,
+-                    realtime_error_mode(&sync_error),
+-                    None,
+-                    None,
+-                    Some(sync_error.message.clone()),
+-                ),
+-            );
+         }
+     });
+ 
+-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
++    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<pebble_mail::SyncProgress>();
++    let (runtime_status_tx, mut runtime_status_rx) = mpsc::unbounded_channel();
+     let app_for_sync_progress = app.clone();
++    let mut health = SyncHealth::new(&account_id, &account.provider, poll_interval_secs);
++    emit_realtime_status(&app_for_sync_progress, health.payload());
+     tokio::spawn(async move {
+-        while let Some(sync_progress) = progress_rx.recv().await {
+-            let _ = app_for_sync_progress.emit(events::MAIL_SYNC_PROGRESS, &sync_progress);
++        let mut runtime_open = true;
++        loop {
++            tokio::select! {
++                progress = progress_rx.recv() => {
++                    let Some(progress) = progress else { break; };
++                    let _ = app_for_sync_progress.emit(events::MAIL_SYNC_PROGRESS, &progress);
++                    if health.progress(&progress, now_timestamp_secs()) {
++                        emit_realtime_status(&app_for_sync_progress, health.payload());
++                    }
++                }
++                runtime = runtime_status_rx.recv(), if runtime_open => {
++                    match runtime {
++                        Some(runtime) => {
++                            health.runtime(runtime);
++                            emit_realtime_status(&app_for_sync_progress, health.payload());
++                        }
++                        None => runtime_open = false,
++                    }
++                }
++            }
+         }
+     });
+ 
+@@ -239,6 +247,7 @@ async fn start_sync_inner(
+         trigger_rx,
+         error_tx,
+         progress_tx,
++        runtime_status_tx,
+         message_tx,
+         app_for_progress,
+         account_id_for_progress,
+@@ -322,11 +331,11 @@ fn manual_realtime_status_payload(
+     )
+ }
+ 
+-fn realtime_error_mode(sync_error: &pebble_mail::SyncError) -> RealtimeMode {
++fn realtime_error_mode(error_type: &str, message: &str) -> RealtimeMode {
+     let text = format!(
+         "{} {}",
+-        sync_error.error_type.to_ascii_lowercase(),
+-        sync_error.message.to_ascii_lowercase()
++        error_type.to_ascii_lowercase(),
++        message.to_ascii_lowercase()
+     );
+     if text.contains("auth")
+         || text.contains("token")
+@@ -343,16 +352,91 @@ fn realtime_error_mode(sync_error: &pebble_mail::SyncError) -> RealtimeMode {
+     }
+ }
+ 
+-fn emit_realtime_status(app: &tauri::AppHandle, payload: RealtimeStatusPayload) {
+-    let _ = app.emit(events::MAIL_REALTIME_STATUS, payload);
++/// Account health follows ordered pass outcomes, not worker lifetime or a timer.
++struct SyncHealth {
++    account_id: String,
++    provider: ProviderType,
++    config: SyncConfig,
++    healthy_mode: RealtimeMode,
++    last_success_at: Option<i64>,
++    failure: Option<(RealtimeMode, String)>,
++    needs_full_imap_pass: bool,
+ }
+ 
+-fn polling_status_message(config: &SyncConfig) -> String {
+-    if config.manual_only() {
+-        "Manual only".to_string()
+-    } else {
+-        format!("Polling every {}s", config.poll_interval_secs)
++impl SyncHealth {
++    fn new(account_id: &str, provider: &ProviderType, interval: Option<u64>) -> Self {
++        let mut config = SyncConfig::default();
++        if let Some(interval) = interval {
++            config.poll_interval_secs = interval;
++        }
++        Self {
++            account_id: account_id.to_string(),
++            provider: provider.clone(),
++            healthy_mode: imap_initial_realtime_mode(&config),
++            config,
++            last_success_at: None,
++            failure: None,
++            needs_full_imap_pass: false,
++        }
++    }
++
++    fn runtime(&mut self, status: SyncRuntimeStatus) {
++        self.healthy_mode = imap_capability_realtime_mode(
++            &self.config,
++            matches!(status, SyncRuntimeStatus::ImapIdleAvailable),
++        );
++    }
++
++    fn progress(&mut self, progress: &pebble_mail::SyncProgress, now: i64) -> bool {
++        if progress.account_id != self.account_id {
++            return false;
++        }
++        match progress.status.as_str() {
++            "error" => {
++                let message = progress
++                    .message
++                    .clone()
++                    .unwrap_or_else(|| "Sync failed".into());
++                self.failure = Some((realtime_error_mode(&progress.phase, &message), message));
++                self.needs_full_imap_pass |= self.provider == ProviderType::Imap
++                    && matches!(progress.phase.as_str(), "initial" | "reconcile" | "manual");
++                true
++            }
++            "completed" => {
++                // An Inbox-only poll cannot prove that a failed full-folder
++                // reconciliation (e.g. Spam/Trash) has recovered.
++                if self.needs_full_imap_pass
++                    && !matches!(progress.phase.as_str(), "initial" | "reconcile")
++                {
++                    return false;
++                }
++                self.failure = None;
++                self.needs_full_imap_pass = false;
++                self.last_success_at = Some(now);
++                true
++            }
++            _ => false,
++        }
+     }
++
++    fn payload(&self) -> RealtimeStatusPayload {
++        let (mode, message) = match &self.failure {
++            Some((mode, message)) => (*mode, Some(message.clone())),
++            None => (self.healthy_mode, None),
++        };
++        realtime_status_payload(
++            &self.account_id,
++            &self.provider,
++            mode,
++            self.last_success_at,
++            None,
++            message,
++        )
++    }
++}
++
++fn emit_realtime_status(app: &tauri::AppHandle, payload: RealtimeStatusPayload) {
++    let _ = app.emit(events::MAIL_REALTIME_STATUS, payload);
+ }
+ 
+ fn realtime_preference_poll_interval(mode: &str) -> std::result::Result<u64, PebbleError> {
+@@ -437,6 +521,7 @@ fn build_sync_task(
+     trigger_rx: mpsc::UnboundedReceiver<SyncTrigger>,
+     error_tx: mpsc::UnboundedSender<pebble_mail::SyncError>,
+     progress_tx: mpsc::UnboundedSender<pebble_mail::SyncProgress>,
++    runtime_status_tx: mpsc::UnboundedSender<SyncRuntimeStatus>,
+     message_tx: mpsc::UnboundedSender<pebble_mail::StoredMessage>,
+     app_for_progress: tauri::AppHandle,
+     account_id_for_progress: String,
+@@ -484,17 +569,6 @@ fn build_sync_task(
+                 if let Some(interval) = poll_interval_secs {
+                     config.poll_interval_secs = interval;
+                 }
+-                emit_realtime_status(
+-                    &app_for_progress,
+-                    realtime_status_payload(
+-                        &account_id_for_progress,
+-                        &ProviderType::Gmail,
+-                        RealtimeMode::Polling,
+-                        Some(now_timestamp_secs()),
+-                        None,
+-                        Some(polling_status_message(&config)),
+-                    ),
+-                );
+                 let worker = GmailSyncWorker::new(
+                     account_id_clone.clone(),
+                     provider,
+@@ -554,17 +628,6 @@ fn build_sync_task(
+                 if let Some(interval) = poll_interval_secs {
+                     config.poll_interval_secs = interval;
+                 }
+-                emit_realtime_status(
+-                    &app_for_progress,
+-                    realtime_status_payload(
+-                        &account_id_for_progress,
+-                        &ProviderType::Outlook,
+-                        RealtimeMode::Polling,
+-                        Some(now_timestamp_secs()),
+-                        None,
+-                        Some(polling_status_message(&config)),
+-                    ),
+-                );
+                 let worker = OutlookSyncWorker::new(
+                     account_id_clone.clone(),
+                     provider,
+@@ -615,21 +678,6 @@ fn build_sync_task(
+                 if let Some(interval) = poll_interval_secs {
+                     config.poll_interval_secs = interval;
+                 }
+-                emit_realtime_status(
+-                    &app_for_progress,
+-                    realtime_status_payload(
+-                        &account_id_for_progress,
+-                        &ProviderType::Pop3,
+-                        if config.manual_only() {
+-                            RealtimeMode::Manual
+-                        } else {
+-                            RealtimeMode::Polling
+-                        },
+-                        Some(now_timestamp_secs()),
+-                        None,
+-                        Some(polling_status_message(&config)),
+-                    ),
+-                );
+                 let worker = Pop3SyncWorker::new(
+                     account_id_clone.clone(),
+                     provider,
+@@ -678,44 +726,6 @@ fn build_sync_task(
+                 if let Some(interval) = poll_interval_secs {
+                     config.poll_interval_secs = interval;
+                 }
+-                emit_realtime_status(
+-                    &app_for_progress,
+-                    realtime_status_payload(
+-                        &account_id_for_progress,
+-                        &ProviderType::Imap,
+-                        imap_initial_realtime_mode(&config),
+-                        Some(now_timestamp_secs()),
+-                        None,
+-                        Some(polling_status_message(&config)),
+-                    ),
+-                );
+-                let (runtime_status_tx, mut runtime_status_rx) = mpsc::unbounded_channel();
+-                let app_for_runtime_status = app_for_progress.clone();
+-                let account_id_for_runtime_status = account_id_for_progress.clone();
+-                let config_for_runtime_status = config.clone();
+-                tokio::spawn(async move {
+-                    while let Some(status) = runtime_status_rx.recv().await {
+-                        let supports_idle = matches!(status, SyncRuntimeStatus::ImapIdleAvailable);
+-                        emit_realtime_status(
+-                            &app_for_runtime_status,
+-                            realtime_status_payload(
+-                                &account_id_for_runtime_status,
+-                                &ProviderType::Imap,
+-                                imap_capability_realtime_mode(
+-                                    &config_for_runtime_status,
+-                                    supports_idle,
+-                                ),
+-                                Some(now_timestamp_secs()),
+-                                None,
+-                                if supports_idle {
+-                                    None
+-                                } else {
+-                                    Some(polling_status_message(&config_for_runtime_status))
+-                                },
+-                            ),
+-                        );
+-                    }
+-                });
+                 let worker = SyncWorker::new(
+                     account_id_clone.clone(),
+                     provider,
+@@ -904,6 +914,77 @@ impl TriggerCoalescer {
+ mod trigger_tests {
+     use super::*;
+ 
++    fn progress(status: &str, phase: &str) -> pebble_mail::SyncProgress {
++        pebble_mail::SyncProgress {
++            account_id: "account-1".into(),
++            status: status.into(),
++            phase: phase.into(),
++            message: (status == "error")
++                .then(|| "Network error: SELECT failed (os error 10054)".into()),
++        }
++    }
++
++    #[test]
++    fn full_reconcile_error_survives_partial_poll_until_full_recovery() {
++        let mut health = SyncHealth::new("account-1", &ProviderType::Imap, None);
++        health.runtime(SyncRuntimeStatus::ImapIdleAvailable);
++        health.progress(&progress("completed", "initial"), 10);
++        health.progress(&progress("error", "reconcile"), 11);
++        assert_eq!(health.payload().mode, RealtimeMode::Offline);
++        assert_eq!(health.payload().last_success_at, Some(10));
++        assert!(!health.progress(&progress("started", "poll"), 12));
++        assert!(!health.progress(&progress("completed", "poll"), 13));
++        // Reconnecting the IDLE socket alone is not a successful full sync.
++        health.runtime(SyncRuntimeStatus::ImapIdleAvailable);
++        assert!(health.payload().message.unwrap().contains("10054"));
++        health.progress(&progress("completed", "reconcile"), 14);
++        let recovered = health.payload();
++        assert_eq!(recovered.mode, RealtimeMode::Realtime);
++        assert!(recovered.message.is_none());
++        assert!(recovered.next_retry_at.is_none());
++        assert_eq!(recovered.last_success_at, Some(14));
++        // A fresh later failure must still be visible.
++        health.progress(&progress("error", "poll"), 15);
++        assert_eq!(health.payload().mode, RealtimeMode::Offline);
++    }
++
++    #[test]
++    fn sync_health_recovery_is_account_scoped_and_preserves_manual_mode() {
++        let mut health = SyncHealth::new("account-1", &ProviderType::Imap, Some(0));
++        health.progress(&progress("error", "reconcile"), 10);
++        let mut other = progress("completed", "manual");
++        other.account_id = "account-2".into();
++        assert!(!health.progress(&other, 11));
++        assert!(health.payload().message.is_some());
++        health.runtime(SyncRuntimeStatus::ImapIdleAvailable);
++        health.progress(&progress("completed", "reconcile"), 12);
++        assert_eq!(health.payload().mode, RealtimeMode::Manual);
++        assert!(health.payload().message.is_none());
++    }
++
++    #[test]
++    fn oauth_and_polling_accounts_recover_only_after_successful_pass() {
++        for provider in [
++            ProviderType::Gmail,
++            ProviderType::Outlook,
++            ProviderType::Pop3,
++            ProviderType::Imap,
++        ] {
++            let mut health = SyncHealth::new("account-1", &provider, None);
++            assert_eq!(health.payload().last_success_at, None);
++            let mut failure = progress("error", "auth");
++            failure.message = Some("Token validation failed".into());
++            health.progress(&failure, 10);
++            assert_eq!(health.payload().mode, RealtimeMode::AuthRequired);
++            health.progress(&progress("started", "poll"), 11);
++            assert!(health.payload().message.is_some());
++            health.progress(&progress("completed", "poll"), 12);
++            assert_eq!(health.payload().mode, RealtimeMode::Polling);
++            assert!(health.payload().message.is_none());
++            assert_eq!(health.payload().last_success_at, Some(12));
++        }
++    }
++
+     #[test]
+     fn coalesces_duplicate_realtime_triggers_for_same_account() {
+         let mut state = TriggerCoalescer::default();
 diff --git a/src/components/MessageList.tsx b/src/components/MessageList.tsx
 index 0c1b1aeba31194702de002b2c3683f9af8adbce7..1e5e07c0d0991961d806af7d774cc9c8a7a3134f 100644
 --- a/src/components/MessageList.tsx
@@ -1865,140 +2379,241 @@ index 5cb9ce37539bd352e01df4f5c86413c118f2185a..742944c81d88c72d3870fc5c5b759ce3
    it("reports a sync error when a sync pass fails", async () => {
      render(<StatusBar />);
  
-diff --git a/src-tauri/src/commands/oauth.rs b/src-tauri/src/commands/oauth.rs
-index 80f4b6266a92e726e1ecc4820ccbf25d619a06b0..28dfb8726290066d17ebfa1e8b347cf1ea2c583d 100644
---- a/src-tauri/src/commands/oauth.rs
-+++ b/src-tauri/src/commands/oauth.rs
-@@ -331,24 +331,42 @@ fn dotenv_lookup_from_str(contents: &str, key: &str) -> Option<String> {
-     None
- }
+diff --git a/tests/features/settings/AccountsTab.imap-folders.test.tsx b/tests/features/settings/AccountsTab.imap-folders.test.tsx
+index ee3d4fb01e522ff982674cd2fce00ef6c6c0ee04..d22c6a14c06f4db4684df883f91c12b143dda802 100644
+--- a/tests/features/settings/AccountsTab.imap-folders.test.tsx
++++ b/tests/features/settings/AccountsTab.imap-folders.test.tsx
+@@ -13,6 +13,7 @@ import {
  
--fn dotenv_contents() -> Option<String> {
-+fn dotenv_candidate_paths(
-+    executable: Option<&std::path::Path>,
-+    current_dir: Option<&std::path::Path>,
-+    manifest_dir: &std::path::Path,
-+) -> Vec<std::path::PathBuf> {
-     let mut candidates = Vec::new();
--    if let Ok(current_dir) = std::env::current_dir() {
-+    // Windows startup and file associations need not use the executable's directory
-+    // as their working directory. Prefer this installation's runtime configuration.
-+    if let Some(executable_dir) = executable.and_then(std::path::Path::parent) {
-+        candidates.push(executable_dir.join(".env"));
-+    }
-+    if let Some(current_dir) = current_dir {
-         candidates.push(current_dir.join(".env"));
-         candidates.push(current_dir.join("..").join(".env"));
-     }
--    candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"));
--    candidates.push(
--        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
--            .join("..")
--            .join(".env"),
--    );
-+    candidates.push(manifest_dir.join(".env"));
-+    candidates.push(manifest_dir.join("..").join(".env"));
-+    candidates
-+}
+ const mocks = vi.hoisted(() => ({
+   invalidateQueries: vi.fn(() => Promise.resolve()),
++  realtimeStatusByAccount: {} as Record<string, unknown>,
+ }));
  
-+fn dotenv_contents_from_paths(candidates: Vec<std::path::PathBuf>) -> Option<String> {
-     candidates
-         .into_iter()
-         .find_map(|path| std::fs::read_to_string(path).ok())
- }
+ vi.mock("react-i18next", () => ({
+@@ -82,7 +83,7 @@ vi.mock("../../../src/stores/mail.store", () => ({
+ vi.mock("../../../src/stores/ui.store", () => ({
+   realtimePreferenceToPollInterval: () => 3,
+   useUIStore: (selector: (state: { realtimeStatusByAccount: Record<string, unknown> }) => unknown) =>
+-    selector({ realtimeStatusByAccount: {} }),
++    selector({ realtimeStatusByAccount: mocks.realtimeStatusByAccount }),
+ }));
  
-+fn dotenv_contents() -> Option<String> {
-+    let executable = std::env::current_exe().ok();
-+    let current_dir = std::env::current_dir().ok();
-+    dotenv_contents_from_paths(dotenv_candidate_paths(
-+        executable.as_deref(),
-+        current_dir.as_deref(),
-+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-+    ))
+ vi.mock("../../../src/stores/toast.store", () => ({
+@@ -138,6 +139,7 @@ const folderSettings = {
+ describe("AccountsTab IMAP folder selection", () => {
+   beforeEach(() => {
+     vi.clearAllMocks();
++    mocks.realtimeStatusByAccount = {};
+     vi.mocked(getAccountSyncRange).mockResolvedValue(null);
+     vi.mocked(getImapSyncFolders).mockResolvedValue(folderSettings);
+     vi.mocked(updateImapSyncFolders).mockImplementation(
+@@ -150,6 +152,23 @@ describe("AccountsTab IMAP folder selection", () => {
+     vi.mocked(triggerSync).mockResolvedValue(undefined);
+   });
+ 
++  it("replaces the account error with healthy status only when recovery is reported", () => {
++    const failure = "Reconcile poll error: SELECT failed (os error 10054)";
++    mocks.realtimeStatusByAccount = {
++      "account-1": { account_id: "account-1", provider: "imap", mode: "offline", message: failure },
++    };
++    const { rerender } = render(<AccountsTab />);
++    expect(screen.getByLabelText(failure)).toBeInTheDocument();
++    // An unrelated account recovering must leave this account's error visible.
++    mocks.realtimeStatusByAccount["account-2"] = { account_id: "account-2", mode: "realtime", message: null };
++    rerender(<AccountsTab />);
++    expect(screen.getByLabelText(failure)).toBeInTheDocument();
++    mocks.realtimeStatusByAccount["account-1"] = { account_id: "account-1", provider: "imap", mode: "realtime", message: null, last_success_at: 123 };
++    rerender(<AccountsTab />);
++    expect(screen.queryByText(failure)).not.toBeInTheDocument();
++    expect(screen.getByLabelText("Realtime connected")).toBeInTheDocument();
++  });
++
+   it("loads a custom range and saves a wider range to backfill earlier mail", async () => {
+     vi.mocked(getAccountSyncRange).mockResolvedValue(14);
+     render(<AccountsTab />);
+diff --git a/crates/pebble-mail/src/test_imap.rs b/crates/pebble-mail/src/test_imap.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..372b5ef90cce530c18f91cd85fdc456b3dcaf186
+--- /dev/null
++++ b/crates/pebble-mail/src/test_imap.rs
+@@ -0,0 +1,179 @@
++// Local, credential-free IMAP fixtures for connection and deletion regressions.
++use std::sync::{Arc, Mutex};
++
++use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
++use tokio::net::TcpListener;
++use tokio::task::{JoinHandle, JoinSet};
++
++use super::imap::{ConnectionSecurity, ImapConfig};
++
++#[derive(Clone, Copy)]
++pub(crate) enum Behavior {
++    SelectDenied,
++    MissingInbox,
++    ByeThenEmpty,
++    ByeThenDenied,
++    ByeTwiceThenEmpty,
++    SilentDone,
++    SilentLogout,
++    DropFirstLogin,
++    RejectLogin,
++    TrashMailbox,
++    NoTrash,
++    ListDenied,
++    PartialListDenied,
++    SilentList,
++    SilentListCollect,
 +}
 +
- fn oauth_config_value_from_sources(
-     key: &str,
-     env_value: Option<&str>,
-@@ -1183,6 +1201,81 @@ mod tests {
-         );
-     }
- 
-+    #[test]
-+    fn dotenv_autostart_reads_install_config_from_an_unrelated_working_directory() {
-+        let temp = std::env::temp_dir().join(format!("pebble-oauth-paths-{}", new_id()));
-+        let install = temp.join("install");
-+        let startup = temp.join("system32");
-+        let manifest = temp.join("source").join("src-tauri");
-+        for dir in [&install, &startup, &manifest] {
-+            std::fs::create_dir_all(dir).unwrap();
++pub(crate) struct Server {
++    port: u16,
++    commands: Arc<Mutex<Vec<String>>>,
++    task: JoinHandle<()>,
++}
++
++impl Drop for Server {
++    fn drop(&mut self) {
++        self.task.abort();
++    }
++}
++
++impl Server {
++    pub(crate) async fn start(behavior: Behavior) -> Self {
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let port = listener.local_addr().unwrap().port();
++        let commands = Arc::new(Mutex::new(Vec::new()));
++        let recorded = Arc::clone(&commands);
++        let task = tokio::spawn(async move {
++            let mut clients = JoinSet::new();
++            let mut connection = 0;
++            loop {
++                let (socket, _) = listener.accept().await.unwrap();
++                let index = connection;
++                connection += 1;
++                let recorded = Arc::clone(&recorded);
++                clients.spawn(async move {
++                    let mut stream = BufReader::new(socket);
++                    stream.get_mut().write_all(b"* OK Test IMAP ready\r\n").await.unwrap();
++                    let mut idle_tag = String::new();
++                    let mut selected = String::new();
++                    let mut moved = false;
++                    loop {
++                        let mut line = String::new();
++                        if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
++                            break;
++                        }
++                        let mut words = line.split_whitespace();
++                        let tag = words.next().unwrap().to_string();
++                        let command = words.next().unwrap_or("").to_ascii_uppercase();
++                        // Never record LOGIN arguments, even in test fixtures.
++                        recorded.lock().unwrap().push(command.clone());
++                        let reply = if tag == "DONE" {
++                            if matches!(behavior, Behavior::SilentDone) {
++                                std::future::pending::<()>().await;
++                            }
++                            format!("{idle_tag} OK IDLE completed\r\n")
++                        } else if command == "LOGIN" {
++                            if matches!(behavior, Behavior::DropFirstLogin) && index == 0 {
++                                break;
++                            }
++                            if matches!(behavior, Behavior::RejectLogin) {
++                                stream.get_mut().write_all(format!("{tag} NO Invalid credentials\r\n").as_bytes()).await.unwrap();
++                                break;
++                            }
++                            format!("{tag} OK LOGIN completed\r\n")
++                        } else if command == "LIST" {
++                            match behavior {
++                                Behavior::SilentList => std::future::pending::<String>().await,
++                                Behavior::SilentListCollect => {
++                                    stream.get_mut().write_all(b"* LIST () \"/\" \"INBOX\"\r\n").await.unwrap();
++                                    std::future::pending::<String>().await
++                                }
++                                Behavior::PartialListDenied => format!("* LIST (\\Trash) \"/\" \"Trash\"\r\n{tag} NO LIST denied\r\n"),
++                                Behavior::ListDenied => format!("{tag} NO LIST denied\r\n"),
++                                Behavior::TrashMailbox => format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"&XfJSIJZk-\"\r\n{tag} OK LIST completed\r\n"),
++                                _ => format!("* LIST () \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n"),
++                            }
++                        } else if command == "SELECT" {
++                            selected = words.next().unwrap_or("").trim_matches('"').to_string();
++                            match behavior {
++                                Behavior::ByeTwiceThenEmpty if index < 2 => {
++                                    stream.get_mut().write_all(b"* BYE problems with connection\r\n").await.unwrap();
++                                    break;
++                                }
++                                Behavior::ByeThenEmpty | Behavior::ByeThenDenied if index == 0 => {
++                                    stream.get_mut().write_all(b"* BYE problems with connection\r\n").await.unwrap();
++                                    break;
++                                }
++                                Behavior::SelectDenied | Behavior::ByeThenDenied => {
++                                    format!("{tag} NO [NOPERM] Permission denied\r\n")
++                                }
++                                Behavior::MissingInbox => format!("{tag} NO SELECT Folder not exist\r\n"),
++                                _ => format!("* FLAGS (\\Seen)\r\n* 0 EXISTS\r\n* OK [UIDVALIDITY 42] UIDs valid\r\n* OK [UIDNEXT 1] Next UID\r\n{tag} OK [READ-WRITE] SELECT completed\r\n"),
++                            }
++                        } else if command == "UID" {
++                            match words.next().unwrap_or("").to_ascii_uppercase().as_str() {
++                                "SEARCH" => {
++                                    let uid = if selected == "&XfJSIJZk-" && moved {
++                                        " 42"
++                                    } else if selected == "INBOX" && !moved {
++                                        " 7"
++                                    } else { "" };
++                                    format!("* SEARCH{uid}\r\n{tag} OK SEARCH completed\r\n")
++                                }
++                                "MOVE" => {
++                                    moved = true;
++                                    format!("{tag} OK MOVE completed\r\n")
++                                }
++                                _ => format!("{tag} OK completed\r\n"),
++                            }
++                        } else if command == "IDLE" {
++                            idle_tag = tag;
++                            "+ idling\r\n".to_string()
++                        } else if command == "LOGOUT" {
++                            if matches!(behavior, Behavior::SilentLogout) {
++                                std::future::pending::<()>().await;
++                            }
++                            format!("* BYE logging out\r\n{tag} OK LOGOUT completed\r\n")
++                        } else {
++                            format!("{tag} OK completed\r\n")
++                        };
++                        if stream.get_mut().write_all(reply.as_bytes()).await.is_err() {
++                            break;
++                        }
++                    }
++                });
++            }
++        });
++        Self {
++            port,
++            commands,
++            task,
 +        }
-+        let installed = "MICROSOFT_CLIENT_ID=installed-client\nGOOGLE_CLIENT_ID=installed-google\nGOOGLE_CLIENT_SECRET=installed-secret\n";
-+        std::fs::write(install.join(".env"), installed).unwrap();
-+        let executable = install.join("pebble.exe");
-+        let paths = || dotenv_candidate_paths(Some(&executable), Some(&startup), &manifest);
-+
-+        // Reproduce Windows startup: no .env in its unrelated working directory.
-+        assert_eq!(
-+            dotenv_contents_from_paths(paths()).as_deref(),
-+            Some(installed)
-+        );
-+        // An unrelated file must not override this installation's client credentials.
-+        std::fs::write(startup.join(".env"), "MICROSOFT_CLIENT_ID=wrong-client").unwrap();
-+        let resolved = dotenv_contents_from_paths(paths()).unwrap();
-+        assert_eq!(resolved, installed);
-+        assert_eq!(
-+            oauth_config_value_from_sources(
-+                "MICROSOFT_CLIENT_ID",
-+                None,
-+                Some(&resolved),
-+                None,
-+                "MICROSOFT_CLIENT_ID_PLACEHOLDER",
-+            ),
-+            "installed-client"
-+        );
-+        // Existing explicit process overrides still take precedence.
-+        assert_eq!(
-+            oauth_config_value_from_sources(
-+                "MICROSOFT_CLIENT_ID",
-+                Some("process-client"),
-+                Some(&resolved),
-+                None,
-+                "MICROSOFT_CLIENT_ID_PLACEHOLDER",
-+            ),
-+            "process-client"
-+        );
-+        std::fs::remove_dir_all(temp).unwrap();
 +    }
 +
-+    #[test]
-+    fn dotenv_keeps_development_fallbacks_when_install_config_is_absent() {
-+        let temp = std::env::temp_dir().join(format!("pebble-oauth-fallbacks-{}", new_id()));
-+        let current_dir = temp.join("work");
-+        let manifest = temp.join("source").join("src-tauri");
-+        std::fs::create_dir_all(&current_dir).unwrap();
-+        std::fs::create_dir_all(&manifest).unwrap();
-+        let executable = temp.join("install").join("pebble.exe");
-+        let paths = || dotenv_candidate_paths(Some(&executable), Some(&current_dir), &manifest);
-+        assert!(dotenv_contents_from_paths(paths()).is_none());
-+        std::fs::write(manifest.join(".env"), "from-manifest").unwrap();
-+        assert_eq!(
-+            dotenv_contents_from_paths(paths()).as_deref(),
-+            Some("from-manifest")
-+        );
-+        std::fs::write(current_dir.join(".env"), "from-workdir").unwrap();
-+        assert_eq!(
-+            dotenv_contents_from_paths(paths()).as_deref(),
-+            Some("from-workdir")
-+        );
-+        // Failed executable/current-directory discovery must remain non-fatal.
-+        assert_eq!(
-+            dotenv_contents_from_paths(dotenv_candidate_paths(None, None, &manifest)).as_deref(),
-+            Some("from-manifest")
-+        );
-+        std::fs::remove_dir_all(temp).unwrap();
++    pub(crate) fn config(&self) -> ImapConfig {
++        ImapConfig {
++            host: "127.0.0.1".to_string(),
++            port: self.port,
++            username: "fixture-user".to_string(),
++            password: "fixture-password".to_string(),
++            security: ConnectionSecurity::Plain,
++            accept_invalid_certs: false,
++            proxy: None,
++        }
 +    }
 +
-     #[test]
-     fn dotenv_lookup_reads_unquoted_and_quoted_values() {
-         let dotenv = r#"
++    pub(crate) fn login_count(&self) -> usize {
++        self.command_count("LOGIN")
++    }
++
++    pub(crate) fn command_count(&self, command: &str) -> usize {
++        self.commands
++            .lock()
++            .unwrap()
++            .iter()
++            .filter(|cmd| cmd.as_str() == command)
++            .count()
++    }
++}

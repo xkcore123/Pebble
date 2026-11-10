@@ -2,7 +2,7 @@
   "base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "39f26ad93aee9d071149ecf8b34e2f2ad696472811697d9f2d687adae95dd5b9",
+  "sha256": "fbfd513a22e9dafc16479bd54568a032f24401e3189f647fc0bc0a54f74aaa6a",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
@@ -12,12 +12,14 @@
     "src-tauri/src/commands/messages/lifecycle.rs",
     "src-tauri/src/commands/oauth.rs",
     "src-tauri/src/commands/pending_mail_ops.rs",
+    "src-tauri/src/commands/sync_cmd.rs",
     "src/components/MessageList.tsx",
     "src/components/StatusBar.tsx",
     "src/locales/en.json",
     "src/locales/zh.json",
     "tests/components/MessageList.test.tsx",
-    "tests/components/StatusBar.realtime.test.tsx"
+    "tests/components/StatusBar.realtime.test.tsx",
+    "tests/features/settings/AccountsTab.imap-folders.test.tsx"
   ],
   "supplemental_fixes": [
     {
@@ -27,6 +29,17 @@
         "src-tauri/src/commands/oauth.rs"
       ],
       "description": "Resolve OAuth .env beside the executable before working-directory fallbacks so autostart and file-association launches use the installed client configuration; regression tests cover unrelated/missing working directories and existing overrides."
+    },
+    {
+      "date": "2026-11-10",
+      "based_on_commit": "29546ce1a56e99187c4b64a99352ed2dec994e7f",
+      "files": [
+        "crates/pebble-mail/src/sync.rs",
+        "crates/pebble-mail/src/test_imap.rs",
+        "src-tauri/src/commands/sync_cmd.rs",
+        "tests/features/settings/AccountsTab.imap-folders.test.tsx"
+      ],
+      "description": "Publish ordered account health recovery after successful sync passes; retain full-reconcile failures across Inbox-only success; retry failed full reconciliation with independent capped backoff and make manual sync a full pass. Add double-BYE recovery and account-status regressions."
     }
   ]
 }
