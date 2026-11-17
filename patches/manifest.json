@@ -2,7 +2,7 @@
   "base_commit": "ee291693bda113767b59bbd291288084801e4a50",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "bbdefae56d3b048f250c9ea422fb4b85d8edaae605117b8e309c5dc6572253cf",
+  "sha256": "d6a4538913c88ecb483506ecfbe9fab04ac047abeca8673b374b30143ae69939",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
@@ -56,7 +56,8 @@
         "src/locales/zh.json",
         "tests/components/MessageList.test.tsx"
       ],
-      "description": "Rebase repairs onto upstream folder management/draft safeguards without losing guarded LIST delimiter/system metadata or local draft deletion accounting. Manual full-sync failures now schedule the same bounded retry as timed reconciliation; repeated failed IDLE cycles fall back to polling, and successful LOGIN no longer resets the IDLE failure streak. Add live loopback manual-retry/IDLE-fallback tests, hierarchy metadata and retry-schedule regressions."
+      "description": "Rebase repairs onto upstream folder management/draft safeguards without losing guarded LIST delimiter/system metadata or local draft deletion accounting. Manual full-sync failures now schedule the same bounded retry as timed reconciliation; repeated failed IDLE cycles fall back to polling, and successful LOGIN no longer resets the IDLE failure streak. Add live loopback manual-retry/IDLE-fallback tests, hierarchy metadata and retry-schedule regressions.",
+      "validation_note": "Use compare_exchange_weak for portable atomic fault injection across Rust stable versions."
     }
   ],
   "original_base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97"

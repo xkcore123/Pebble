@@ -1235,10 +1235,10 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..5d148e4aa873f2add1ff29dbc0cfc661
          let error = pebble_core::PebbleError::Network(
 diff --git a/crates/pebble-mail/src/test_imap.rs b/crates/pebble-mail/src/test_imap.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..28438f6fda0dfdbf914744214ad3c8acc6748ffd
+index 0000000000000000000000000000000000000000..31d1c67d5883166529358ee9f91771a2721dce30
 --- /dev/null
 +++ b/crates/pebble-mail/src/test_imap.rs
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,219 @@
 +// Local, credential-free IMAP fixtures for connection and deletion regressions.
 +use std::sync::atomic::{AtomicUsize, Ordering};
 +use std::sync::{Arc, Mutex};
@@ -1269,6 +1269,22 @@ index 0000000000000000000000000000000000000000..28438f6fda0dfdbf914744214ad3c8ac
 +    PartialListDenied,
 +    SilentList,
 +    SilentListCollect,
++}
++
++fn take_select_failure(counter: &AtomicUsize) -> bool {
++    let mut current = counter.load(Ordering::SeqCst);
++    while current > 0 {
++        match counter.compare_exchange_weak(
++            current,
++            current - 1,
++            Ordering::SeqCst,
++            Ordering::SeqCst,
++        ) {
++            Ok(_) => return true,
++            Err(value) => current = value,
++        }
++    }
++    false
 +}
 +
 +pub(crate) struct Server {
@@ -1347,7 +1363,7 @@ index 0000000000000000000000000000000000000000..28438f6fda0dfdbf914744214ad3c8ac
 +                        } else if command == "SELECT" {
 +                            selected = words.next().unwrap_or("").trim_matches('"').to_string();
 +                            match behavior {
-+                                Behavior::ArmedBye if select_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() => {
++                                Behavior::ArmedBye if take_select_failure(&select_failures) => {
 +                                    recorded.lock().unwrap().push("INJECTED_BYE".into());
 +                                    stream.get_mut().write_all(b"* BYE injected connection reset\r\n").await.unwrap();
 +                                    break;
