@@ -19,6 +19,23 @@ use super::messages::{
 const WORKER_INTERVAL_SECS: u64 = 30;
 const WORKER_BATCH_LIMIT: i64 = 20;
 
+#[tauri::command]
+pub fn retry_failed_send(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    op_id: String,
+    confirm_duplicate_risk: bool,
+) -> Result<(), PebbleError> {
+    if !confirm_duplicate_risk {
+        return Err(PebbleError::Validation(
+            "Check Sent and confirm the risk of duplicate delivery before retrying".into(),
+        ));
+    }
+    state.store.retry_failed_send(&op_id)?;
+    emit_pending_ops_changed(Some(&app));
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingMailOpsSummaryResponse {
     pub pending_count: i64,
@@ -292,6 +309,9 @@ async fn replay_pending_mail_op(
         }
         "move_to_folder" => {
             replay_remote_move_to_folder(state, account.provider, &message, &payload).await?;
+        }
+        "managed_move" => {
+            super::folder_management::replay_managed_move(state, &message, &payload).await?;
         }
         "send" => {
             if !remote_side_effect_already_applied(op)? {
@@ -740,6 +760,8 @@ fn apply_pending_local_commit(
                 .ok_or_else(|| PebbleError::Internal("No move target folder".to_string()))?;
             store.move_message_to_folder(&op.message_id, &folder_id)?;
         }
+        // The provider-aware replay commits membership and destination identity atomically.
+        "managed_move" => {}
         "send" => {
             if compose::send_finalize_deletes_placeholder(&payload) {
                 store.complete_outgoing_send(&op.message_id, &op.id, None)?;

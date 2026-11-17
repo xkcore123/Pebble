@@ -229,12 +229,18 @@ impl Store {
                 "SELECT id, account_id, message_id, op_type, payload_json, status,
                         attempts, last_error, created_at, updated_at, next_retry_at
                  FROM pending_mail_ops
-                 WHERE status = 'pending'
+                 WHERE (status = 'pending'
                     OR (
                         status = 'failed'
                         AND attempts < ?2
                         AND (next_retry_at IS NULL OR next_retry_at <= ?3)
-                    )
+                    ))
+                   AND NOT EXISTS (
+                       SELECT 1 FROM pending_mail_ops claimed
+                       WHERE claimed.message_id = pending_mail_ops.message_id
+                         AND claimed.op_type = 'managed_move'
+                         AND claimed.status = 'in_progress'
+                   )
                  ORDER BY updated_at ASC
                  LIMIT ?1",
             )?;
@@ -528,6 +534,22 @@ impl Store {
         })
     }
 
+    pub fn retry_failed_send(&self, id: &str) -> Result<()> {
+        self.with_write(|conn| {
+            let updated = conn.execute(
+                "UPDATE pending_mail_ops SET status = 'pending', attempts = 0,
+                 last_error = NULL, next_retry_at = ?1, updated_at = ?1
+                 WHERE id = ?2 AND status = 'failed' AND op_type = 'send'
+               AND EXISTS (SELECT 1 FROM messages WHERE messages.id = pending_mail_ops.message_id AND messages.is_deleted = 0)",
+                params![pebble_core::now_timestamp(), id],
+            )?;
+            if updated != 1 {
+                return Err(pebble_core::PebbleError::Validation("Failed send is no longer available for retry".into()));
+            }
+            Ok(())
+        })
+    }
+
     pub fn mark_pending_mail_op_done(&self, id: &str) -> Result<()> {
         self.with_write(|conn| {
             conn.execute(
@@ -562,6 +584,65 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_send_only_retries_after_explicit_request_and_preserves_receipt() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_account();
+        store.insert_account(&account).unwrap();
+        let message = test_message(&account.id);
+        store.insert_message(&message, &[]).unwrap();
+        let id = store
+            .insert_pending_mail_op(&account.id, &message.id, "send", "{}")
+            .unwrap();
+        store
+            .mark_pending_mail_op_outcome_unknown(&id, "Check Sent")
+            .unwrap();
+        assert!(store
+            .list_retryable_pending_mail_ops(10)
+            .unwrap()
+            .is_empty());
+        store.retry_failed_send(&id).unwrap();
+        let queued = store.list_retryable_pending_mail_ops(10).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, id);
+        assert_eq!(queued[0].attempts, 0);
+        assert!(store.retry_failed_send(&id).is_err());
+        store.mark_pending_mail_op_remote_succeeded(&id).unwrap();
+        store
+            .mark_pending_mail_op_stopped(&id, "Local finalize failed")
+            .unwrap();
+        store.retry_failed_send(&id).unwrap();
+        let queued = store.list_retryable_pending_mail_ops(10).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&queued[0].payload_json).unwrap()
+                ["remote_succeeded"],
+            true
+        );
+    }
+
+    #[test]
+    fn manual_send_retry_rejects_non_send_or_missing_message() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_account();
+        store.insert_account(&account).unwrap();
+        let message = test_message(&account.id);
+        store.insert_message(&message, &[]).unwrap();
+        let id = store
+            .insert_pending_mail_op(&account.id, &message.id, "delete", "{}")
+            .unwrap();
+        store.mark_pending_mail_op_stopped(&id, "Failed").unwrap();
+        assert!(store.retry_failed_send(&id).is_err());
+        assert!(store.retry_failed_send("missing").is_err());
+        let send = store
+            .insert_pending_mail_op(&account.id, &message.id, "send", "{}")
+            .unwrap();
+        store.mark_pending_mail_op_stopped(&send, "Failed").unwrap();
+        store
+            .bulk_soft_delete(std::slice::from_ref(&message.id))
+            .unwrap();
+        assert!(store.retry_failed_send(&send).is_err());
+    }
 
     #[test]
     fn restore_cannot_attach_new_credentials_to_legacy_cached_mail() {

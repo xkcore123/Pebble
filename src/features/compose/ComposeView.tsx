@@ -27,6 +27,15 @@ import type { ComposeAttachment } from "./compose-draft";
 import { ModeButton, EditorToolbar, MarkdownToolbar, composeStyles } from "./ComposeToolbar";
 import { subjectAfterAddingAttachments } from "./attachment-subject";
 import { isValidEmailAddress, mergePendingRecipient } from "./recipient-utils";
+import { queryClient } from "@/lib/query-client";
+import { queueControlledSend, restoreControlledSend, deleteControlledSend, listControlledSends, type ControlledSend } from "@/lib/send-controls-api";
+import { useControlledSends } from "./ScheduledSendsView";
+import { countdownSeconds, scheduledInstant } from "./send-control-time";
+import { loadUndoSeconds } from "./send-controls-settings";
+import ScheduleTimeInput from "./ScheduleTimeInput";
+import { useSendControlsStore } from "@/stores/send-controls.store";
+import "./send-controls.css";
+import { threadMessagesQueryKey } from "@/hooks/queries/useThreadMessagesQuery";
 
 export default function ComposeView() {
   const composeMode = useComposeStore((s) => s.composeMode);
@@ -53,12 +62,23 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
   const [isDiscarding, setIsDiscarding] = useState(false);
   const sendInProgressRef = useRef(false);
   const [sendInProgress, setSendInProgress] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const composeDraft = useComposeStore((s) => s.composeDraft);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [scheduleValue, setScheduleValue] = useState("");
+  const [pendingSend, setPendingSend] = useState<ControlledSend | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [undoBusy, setUndoBusy] = useState(false);
+  const [reviewBeforeRetry, setReviewBeforeRetry] = useState(false);
+  const [queueReplyUnknown, setQueueReplyUnknown] = useState(false);
+  const sendRequestIdRef = useRef<string | null>(null);
+  const controlledSends = useControlledSends(Boolean(pendingSend));
 
   const isReply = composeMode === "reply" || composeMode === "reply-all";
   const restoredDraft = useRef(
-    composeMode === "new"
+    composeDraft ?? (composeMode === "new"
       ? loadDraftFromStorage(accountsLoaded ? accounts.map((account) => account.id) : undefined)
-      : null,
+      : null),
   );
 
   // ─── Recipients ──────────────────────────────────────────────────────────────
@@ -126,11 +146,13 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
   useEffect(() => {
     if (editor && !editorReady) setEditorReady(true);
   }, [editor, editorReady]);
-  const { cancelPendingDraftSaves } = useComposeDraft({
+  const { cancelPendingDraftSaves, flushDraftSave, resumeDraftSaves, draftIdsByAccountRef } = useComposeDraft({
     to, cc, bcc, subject, rawSource, richTextHtml, editorMode, composeMode, fromAccountId,
     attachments,
     editorReady,
-    migrateLegacyDraft: Boolean(restoredDraft.current),
+    migrateLegacyDraft: Boolean(restoredDraft.current && !composeDraft),
+    existingDraftId: composeDraft?.id,
+    inReplyTo: composeDraft?.inReplyTo ?? (isReply ? composeReplyTo?.message_id_header ?? undefined : undefined),
   });
 
   // ─── Templates ───────────────────────────────────────────────────────────────
@@ -219,14 +241,44 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
     };
   }, []);
 
-  async function cleanupSavedDrafts(context: "send" | "discard") {
+  async function cleanupSavedDrafts(context: "send" | "schedule" | "discard") {
     const draftIdsToDelete = await cancelPendingDraftSaves();
     const deletionResults = await Promise.allSettled(
       Object.entries(draftIdsToDelete).map(([draftAccountId, draftId]) =>
         deleteDraft(draftAccountId, draftId),
       ),
     );
-    if (deletionResults.some((result) => result.status === "rejected")) {
+    const deletedIds = new Set<string>();
+    Object.entries(draftIdsToDelete).forEach(([accountId, draftId], index) => {
+      if (deletionResults[index].status === "fulfilled") {
+        deletedIds.add(draftId);
+        if (composeDraft?.id && composeDraft.accountId === accountId) {
+          deletedIds.add(composeDraft.id);
+        }
+        if (draftIdsByAccountRef.current[accountId] === draftId) {
+          delete draftIdsByAccountRef.current[accountId];
+        }
+      }
+    });
+    if (deletedIds.size > 0) {
+      useMailStore.setState((state) => {
+        const threadMessages = state.selectedThreadId
+          ? queryClient.getQueryData<{ id: string }[]>(threadMessagesQueryKey(state.selectedThreadId))
+          : undefined;
+        const removedThread = deletedIds.has(state.selectedThreadId ?? "")
+          || (threadMessages?.length ? threadMessages.every((message) => deletedIds.has(message.id)) : false);
+        return {
+          selectedMessageId: deletedIds.has(state.selectedMessageId ?? "") ? null : state.selectedMessageId,
+          selectedThreadId: removedThread ? null : state.selectedThreadId,
+          selectedMessageIds: new Set([...state.selectedMessageIds].filter((id) => !deletedIds.has(id))),
+        };
+      });
+    }
+    void queryClient.invalidateQueries({ queryKey: ["messages"] });
+    void queryClient.invalidateQueries({ queryKey: ["threads"] });
+    void queryClient.invalidateQueries({ queryKey: ["threadMessages"] });
+    const failed = deletionResults.some((result) => result.status === "rejected");
+    if (failed) {
       for (const result of deletionResults) {
         if (result.status === "rejected") {
           console.warn(`Failed to delete draft after ${context}:`, result.reason);
@@ -234,17 +286,18 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
       }
       useToastStore.getState().addToast({
         type: "error",
-        message: context === "send"
+        message: context === "schedule" ? t("sendControls.draftCleanupFailed") : context === "send"
           ? t(
               "compose.draftCleanupFailed",
               "Sent, but failed to remove the saved draft. You can delete it from Drafts.",
             )
           : t(
-              "compose.discardDraftCleanupFailed",
-              "Discarded, but failed to remove the saved draft. You can delete it from Drafts.",
+              "compose.discardFailed",
+              "Could not remove the saved draft. Your draft is still open; please try again.",
             ),
       });
     }
+    return !failed;
   }
 
   async function stageAttachmentFiles(files: FileList | File[]) {
@@ -299,8 +352,109 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
     return () => clearTimeout(timer);
   }, [sendError]);
 
-  async function handleSend() {
+  useEffect(() => {
+    useSendControlsStore.setState({ composeUndoId: pendingSend?.id ?? null });
+    return () => useSendControlsStore.setState({ composeUndoId: null });
+  }, [pendingSend?.id]);
+
+  useEffect(() => {
+    if (!pendingSend) return;
+    const update = () => setSecondsLeft(countdownSeconds(pendingSend.dueAt));
+    update();
+    const timer = setInterval(update, 100);
+    return () => clearInterval(timer);
+  }, [pendingSend]);
+
+  useEffect(() => {
+    if (!pendingSend || undoBusy) return;
+    const job = controlledSends.data?.find((item) => item.id === pendingSend.id);
+    if (job?.state === "sent") {
+      setPendingSend(null);
+      void (async () => {
+        // Native queue ownership cleans source drafts even after navigation/restart.
+        await cleanupAllStagedAttachments();
+        clearDraftStorage();
+        useComposeStore.getState().setComposeDirty(false);
+        closeCompose();
+      })();
+    } else if (job?.state === "review") {
+      setPendingSend(null);
+      setReviewBeforeRetry(true);
+      setSendError(t("sendControls.reviewWarning"));
+      sendInProgressRef.current = false;
+      setSendInProgress(false);
+      resumeDraftSaves();
+    } else if (job?.state === "draft") {
+      setPendingSend(null);
+      sendRequestIdRef.current = null;
+      sendInProgressRef.current = false;
+      setSendInProgress(false);
+      resumeDraftSaves();
+    }
+  }, [controlledSends.data, pendingSend, undoBusy]);
+
+  async function handleUndo() {
+    if (!pendingSend || undoBusy) return;
+    setUndoBusy(true);
+    try {
+      const job = controlledSends.data?.find((item) => item.id === pendingSend.id) ?? pendingSend;
+      const snapshot = await restoreControlledSend(job);
+      await cleanupAllStagedAttachments();
+      stagedAttachmentPathsRef.current = new Set(snapshot.attachments.map((a) => a.path));
+      attachmentsRef.current = snapshot.attachments;
+      setAttachments(snapshot.attachments);
+      setPendingSend(null);
+      sendInProgressRef.current = false;
+      setSendInProgress(false);
+      sendRequestIdRef.current = null;
+      resumeDraftSaves();
+      // Source drafts were never deleted; removing this cancelled backup is safe.
+      void deleteControlledSend({ ...job, revision: job.revision + 1 }).catch(() => {});
+    } catch {
+      setSendError(t("sendControls.error"));
+      void controlledSends.refetch();
+    } finally { setUndoBusy(false); }
+  }
+
+  async function resolveQueueReply() {
+    try {
+      const jobs = await listControlledSends();
+      const job = jobs.find((item) => item.id === sendRequestIdRef.current);
+      setQueueReplyUnknown(false);
+      if (job) {
+        setPendingSend(job);
+        // Use the reply itself when the query cache has not caught up yet.
+        await queryClient.invalidateQueries({ queryKey: ["send-controls"] });
+      } else {
+        sendInProgressRef.current = false;
+        setSendInProgress(false);
+        resumeDraftSaves();
+        setSendError(t("sendControls.error"));
+      }
+    } catch {
+      // A lost IPC reply is not evidence that queueing failed. Keep the copy inert.
+      setQueueReplyUnknown(true);
+    }
+  }
+
+  async function handleSend(scheduleAt?: number) {
     if (sendInProgressRef.current || discardInProgressRef.current) return;
+    if (reviewBeforeRetry) {
+      if (!(await useConfirmStore.getState().confirm({ title: t("sendControls.review"), message: t("sendControls.restoreWarning") }))) return;
+      try {
+        const jobs = await listControlledSends();
+        const job = jobs.find((item) => item.id === sendRequestIdRef.current);
+        if (job?.state === "review") {
+          const restored = await restoreControlledSend(job);
+          await Promise.allSettled(restored.attachments.map((attachment) => cleanupStagedComposeAttachment(attachment.path)));
+        } else if (job && job.state !== "draft") {
+          setSendError(t("sendControls.error"));
+          return;
+        }
+      } catch { setSendError(t("sendControls.error")); return; }
+      setReviewBeforeRetry(false);
+      sendRequestIdRef.current = null;
+    }
     const finalTo = mergePendingRecipient(to, toInputValue).filter(Boolean);
     const finalCc = mergePendingRecipient(cc, ccInputValue).filter(Boolean);
     const finalBcc = mergePendingRecipient(bcc, bccInputValue).filter(Boolean);
@@ -357,10 +511,41 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
     }
     const outgoingBodyHtml = appendReplyQuoteHtml(bodyHtml, quotedReplyHtml);
 
-    const inReplyTo =
+    const inReplyTo = composeDraft?.inReplyTo ?? (
       isReply && composeReplyTo?.message_id_header
         ? composeReplyTo.message_id_header
-        : undefined;
+        : undefined);
+
+    const undoSeconds = loadUndoSeconds();
+    if (scheduleAt !== undefined || undoSeconds > 0) {
+      try {
+        // Complete autosave first, but do not delete the source draft during Undo.
+        await flushDraftSave({ to: finalTo, cc: finalCc, bcc: finalBcc });
+        await cancelPendingDraftSaves();
+        const requestId = sendRequestIdRef.current ??= crypto.randomUUID();
+        const job = await queueControlledSend({
+          sourceDrafts: Object.entries(draftIdsByAccountRef.current).map(([accountId, id]) => ({ accountId, id })),
+          accountId: fromAccountId, to: finalTo, cc: finalCc, bcc: finalBcc,
+          subject: finalSubject, bodyText, bodyHtml: outgoingBodyHtml || undefined,
+          inReplyTo, editorMode, composeMode: composeMode ?? "new",
+          rawSource, richTextHtml: editorMode === "rich" ? bodyHtml : richTextHtml,
+          quotedReplyHtml, attachments: attachmentsRef.current,
+        }, scheduleAt !== undefined ? { dueAt: scheduleAt } : { undoSeconds }, requestId);
+        if (scheduleAt !== undefined) {
+          // The independently encrypted scheduled copy now owns its attachment lifetime.
+          // Source drafts stay protected by durable queue ownership until delivery/cancellation.
+          await cleanupAllStagedAttachments();
+          clearDraftStorage();
+          useComposeStore.getState().setComposeDirty(false);
+          useToastStore.getState().addToast({ message: t("sendControls.queued"), type: "success" });
+          closeCompose();
+        } else { setPendingSend(job); }
+      } catch {
+        setQueueReplyUnknown(true);
+        await resolveQueueReply();
+      }
+      return;
+    }
 
     sendMutation.mutate(
       {
@@ -407,13 +592,39 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
       await waitForPendingAttachmentStaging();
     }
     if (!acceptsStagedAttachmentsRef.current) return;
-    await cleanupSavedDrafts("discard");
+    if (!(await cleanupSavedDrafts("discard"))) {
+      resumeDraftSaves();
+      discardInProgressRef.current = false;
+      setIsDiscarding(false);
+      return;
+    }
     await cleanupAllStagedAttachments();
     clearDraftStorage();
     useComposeStore.getState().setComposeDirty(false);
     discardInProgressRef.current = false;
     setIsDiscarding(false);
     confirmCloseCompose();
+  }
+
+  async function handleSaveAndClose() {
+    if (isSaving || discardInProgressRef.current || sendInProgressRef.current) return;
+    setIsSaving(true);
+    try {
+      await flushDraftSave({
+        to: mergePendingRecipient(to, toInputValue),
+        cc: mergePendingRecipient(cc, ccInputValue),
+        bcc: mergePendingRecipient(bcc, bccInputValue),
+      });
+      await cancelPendingDraftSaves();
+      await cleanupAllStagedAttachments();
+      clearDraftStorage();
+      useComposeStore.getState().setComposeDirty(false);
+      confirmCloseCompose();
+    } catch (error) {
+      useToastStore.getState().addToast({ type: "error", message: String(error) });
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   const title =
@@ -434,14 +645,23 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
   return (
     <div
       aria-busy={sendInProgress}
-      inert={sendInProgress}
       style={{
         display: "flex",
         flexDirection: "column",
         height: "100%",
-        pointerEvents: sendInProgress ? "none" : undefined,
       }}
     >
+      {pendingSend && <div className="send-controls-banner" role="status">
+        <span>{secondsLeft > 0 ? t("sendControls.countdown", { count: secondsLeft }) : t("sendControls.undoWaiting")}</span>
+        <button disabled={undoBusy} onClick={() => void handleUndo()}>{t("sendControls.undo")}</button>
+        <small>{t("sendControls.undoHint")}</small>
+        {sendError && <p role="alert">{sendError}</p>}
+      </div>}
+      {queueReplyUnknown && <div role="alert" className="send-controls-banner">
+        {t("sendControls.queueReplyUnknown")}
+        <button onClick={() => void resolveQueueReply()}>{t("sendControls.refresh")}</button>
+      </div>}
+      <div inert={sendInProgress} style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       {/* Header */}
       <div
         style={{
@@ -466,7 +686,7 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
           </span>
         </div>
         <button
-          onClick={handleSend}
+          onClick={() => void handleSend()}
           disabled={sendDisabled}
           style={{
             display: "flex", alignItems: "center", gap: "6px",
@@ -481,6 +701,19 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
           <Send size={14} />
           {sendInProgress || sendMutation.isPending ? t("compose.sending", "Sending...") : t("compose.send", "Send")}
         </button>
+      </div>
+
+      <div className="send-controls-options">
+        <button disabled={sendDisabled} onClick={() => setShowSchedule((value) => !value)}>{t("sendControls.schedule")}</button>
+        {showSchedule && <>
+          <ScheduleTimeInput value={scheduleValue} onChange={setScheduleValue} />
+          <button disabled={sendDisabled || scheduledInstant(scheduleValue) === null} onClick={() => {
+            const instant = scheduledInstant(scheduleValue);
+            if (instant === null) { setSendError(t("sendControls.invalidTime")); return; }
+            void handleSend(instant);
+          }}>{t("sendControls.schedule")}</button>
+          <small>{t("sendControls.policy")}</small>
+        </>}
       </div>
 
       {/* Error banner */}
@@ -971,9 +1204,11 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
           message={t("compose.leaveMessage", "You have unsaved changes. Are you sure you want to leave?")}
           cancelLabel={t("compose.leaveCancel", "Keep editing")}
           confirmLabel={t("compose.leaveConfirm", "Discard")}
-          busyConfirmLabel={t("compose.discarding", "Discarding...")}
+          busyConfirmLabel={isSaving ? t("common.saving", "Saving...") : t("compose.discarding", "Discarding...")}
           destructive
-          busy={isDiscarding}
+          busy={isDiscarding || isSaving}
+          extraActionLabel={t("compose.saveAndClose", "Save and close")}
+          onExtraAction={() => { void handleSaveAndClose(); }}
           confirmDisabled={pendingAttachmentStagingCount > 0}
           onCancel={() => {
             if (!discardInProgressRef.current) cancelCloseCompose();
@@ -981,6 +1216,7 @@ function ComposeViewInner({ accounts, accountsLoaded }: { accounts: Account[]; a
           onConfirm={() => { void handleDiscard(); }}
         />
       )}
+      </div>
     </div>
   );
 }

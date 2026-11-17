@@ -46,6 +46,7 @@
     "quit": "Quit Pebble"
   },
   "sidebar": {
+    "outbox": "Outbox",
     "inbox": "Inbox",
     "sent": "Sent",
     "drafts": "Drafts",
@@ -110,8 +111,12 @@
     "saveAsTemplate": "Save current",
     "noTemplates": "No templates saved",
     "templateName": "Template name",
-    "leaveTitle": "Discard draft?",
-    "leaveMessage": "You have unsaved changes. Are you sure you want to leave?",
+    "saveAndClose": "Save and close",
+    "discardFailed": "Could not remove the saved draft. Your draft is still open; please try again.",
+    "resumeDraft": "Resume draft",
+    "inlineDraftUnsupported": "This draft contains embedded images that the editor cannot preserve. It has not been opened for editing; the original draft is unchanged.",
+    "leaveTitle": "Leave draft?",
+    "leaveMessage": "Save this draft to continue later, or discard it.",
     "leaveCancel": "Keep editing",
     "leaveConfirm": "Discard",
     "toolbar": {
@@ -307,6 +312,8 @@
     "autoBackupFillFields": "Fill in WebDAV credentials above to enable auto-backup."
   },
   "pendingOps": {
+    "retrySend": "Retry send",
+    "retrySendWarning": "Check Sent first. The previous delivery may have succeeded; retrying could send a duplicate. Retry this message?",
     "title": "Remote Writes",
     "description": "Queued mail changes are retried in the background until the provider accepts them.",
     "accountFilter": "Account",
@@ -459,6 +466,7 @@
     "unarchiveSuccess": "Message moved to inbox",
     "unarchiveFailed": "Failed to unarchive",
     "deleteConfirm": "Move this message to trash?",
+    "deleteLocalDraftConfirm": "Permanently delete this local draft? This cannot be undone.",
     "deleteSuccess": "Message deleted",
     "deleteFailed": "Failed to delete message",
     "restoreSuccess": "Message restored to inbox",
@@ -527,6 +535,7 @@
     "securityPlain": "None",
     "proxyHost": "SOCKS5 Proxy",
     "proxyPort": "Port",
+    "proxyPortInvalid": "Port must be an integer between 1 and 65535.",
     "signInGoogle": "Sign in with Google",
     "signInOutlook": "Sign in with Outlook",
     "orManual": "or add account manually",
@@ -804,6 +813,7 @@
     "failed": "Batch operation failed",
     "deleteTitle": "Delete {{count}} messages?",
     "deleteConfirm": "This will move {{count}} message(s) to Trash. This action can be undone by restoring from Trash.",
+    "deleteWithLocalDraftsConfirm": "Local-only drafts in this selection will be permanently deleted and cannot be restored. Other messages will move to Trash.",
     "deleteButton": "Delete",
     "selectMessage": "Select message",
     "star": "Star",

@@ -1,11 +1,23 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ComposeView from "../../../src/features/compose/ComposeView";
+import { useMailStore } from "../../../src/stores/mail.store";
+import { queryClient } from "../../../src/lib/query-client";
+import type { DraftData } from "../../../src/hooks/useComposeDraft";
 import {
   cleanupStagedComposeAttachment,
   deleteDraft,
   stageComposeAttachment,
 } from "../../../src/lib/api";
+import { listControlledSends, queueControlledSend, restoreControlledSend } from "../../../src/lib/send-controls-api";
+
+vi.mock("../../../src/features/compose/ScheduledSendsView", () => ({
+  useControlledSends: () => ({ data: [], refetch: vi.fn() }),
+}));
+vi.mock("../../../src/lib/send-controls-api", () => ({
+  queueControlledSend: vi.fn(), restoreControlledSend: vi.fn(), deleteControlledSend: vi.fn().mockResolvedValue(undefined),
+  listControlledSends: vi.fn().mockResolvedValue([]),
+}));
 
 const mocks = vi.hoisted(() => ({
   mutate: vi.fn(),
@@ -14,10 +26,13 @@ const mocks = vi.hoisted(() => ({
   addToast: vi.fn(),
   loadDraftFromStorage: vi.fn(),
   cancelPendingDraftSaves: vi.fn(),
+  flushDraftSave: vi.fn(),
+  resumeDraftSaves: vi.fn(),
   confirmCloseCompose: vi.fn(),
   cancelCloseCompose: vi.fn(),
   showComposeLeaveConfirm: false,
   quotedReplyHtml: "",
+  composeDraft: null as DraftData | null,
   accountsQuery: {
     data: [{ id: "account-1", email: "me@example.com", display_name: "Me" }],
     isLoading: false,
@@ -32,12 +47,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (_key: string, fallback?: string) => fallback ?? _key }),
-}));
-
-vi.mock("../../../src/stores/mail.store", () => ({
-  useMailStore: (selector: (state: { activeAccountId: string }) => unknown) =>
-    selector({ activeAccountId: "account-1" }),
+  useTranslation: () => ({ t: (_key: string, fallback?: unknown) => typeof fallback === "string" ? fallback : _key, i18n: { language: "en" } }),
 }));
 
 vi.mock("../../../src/stores/compose.store", () => ({
@@ -52,6 +62,7 @@ vi.mock("../../../src/stores/compose.store", () => ({
     }) => unknown) =>
       selector({
         composeMode: "new",
+        composeDraft: mocks.composeDraft,
         composeReplyTo: null,
         closeCompose: mocks.closeCompose,
         showComposeLeaveConfirm: mocks.showComposeLeaveConfirm,
@@ -97,6 +108,8 @@ vi.mock("../../../src/hooks/useComposeDraft", () => ({
     draftIdRef: { current: "draft-1" },
     draftIdsByAccountRef: { current: { "account-1": "draft-1" } },
     cancelPendingDraftSaves: mocks.cancelPendingDraftSaves,
+    flushDraftSave: mocks.flushDraftSave,
+    resumeDraftSaves: mocks.resumeDraftSaves,
   }),
   loadDraftFromStorage: mocks.loadDraftFromStorage,
   clearDraftStorage: vi.fn(),
@@ -206,9 +219,44 @@ function deferred<T>() {
 }
 
 describe("ComposeView", () => {
+  it("saves immediately before leaving instead of deleting the saved draft", async () => {
+    mocks.showComposeLeaveConfirm = true;
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Save and close" }));
+    await waitFor(() => expect(mocks.confirmCloseCompose).toHaveBeenCalledOnce());
+    expect(mocks.flushDraftSave).toHaveBeenCalledOnce();
+    expect(deleteDraft).not.toHaveBeenCalled();
+  });
+
+  it("stays open when saving fails", async () => {
+    mocks.showComposeLeaveConfirm = true;
+    mocks.flushDraftSave.mockRejectedValue(new Error("Disk full"));
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Save and close" }));
+    await waitFor(() => expect(mocks.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "error" })));
+    expect(mocks.confirmCloseCompose).not.toHaveBeenCalled();
+    expect(deleteDraft).not.toHaveBeenCalled();
+  });
+
+  it("retains the editor and attachment sources when discard cleanup fails", async () => {
+    mocks.showComposeLeaveConfirm = true;
+    vi.mocked(deleteDraft).mockRejectedValue(new Error("Unavailable"));
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(mocks.resumeDraftSaves).toHaveBeenCalledOnce());
+    expect(mocks.confirmCloseCompose).not.toHaveBeenCalled();
+    expect(cleanupStagedComposeAttachment).not.toHaveBeenCalled();
+  });
   let warnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    localStorage.setItem("pebble-undo-send-seconds", "0");
+    vi.mocked(queueControlledSend).mockReset();
+    vi.mocked(restoreControlledSend).mockReset();
+    useMailStore.setState({ activeAccountId: "account-1", selectedMessageId: null,
+      selectedThreadId: null, selectedMessageIds: new Set(), batchMode: false });
+    queryClient.clear();
+    mocks.composeDraft = null;
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     mocks.mutate.mockReset();
     mocks.closeCompose.mockReset();
@@ -216,6 +264,8 @@ describe("ComposeView", () => {
     mocks.addToast.mockReset();
     mocks.loadDraftFromStorage.mockReset();
     mocks.cancelPendingDraftSaves.mockReset();
+    mocks.flushDraftSave.mockReset().mockResolvedValue("draft-1");
+    mocks.resumeDraftSaves.mockReset();
     mocks.cancelPendingDraftSaves.mockResolvedValue({ "account-1": "draft-1" });
     mocks.confirmCloseCompose.mockReset();
     mocks.cancelCloseCompose.mockReset();
@@ -239,6 +289,104 @@ describe("ComposeView", () => {
 
   afterEach(() => {
     warnSpy.mockRestore();
+    localStorage.removeItem("pebble-undo-send-seconds");
+  });
+
+  it("uses the default pre-delivery Undo queue without invoking the normal sender or deleting drafts", async () => {
+    localStorage.removeItem("pebble-undo-send-seconds");
+    vi.mocked(queueControlledSend).mockResolvedValue({ id: "job", accountId: "account-1", subject: "Subject", dueAt: Math.floor(Date.now() / 1000) + 10, revision: 0, state: "pending", kind: "undo" });
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(queueControlledSend).toHaveBeenCalledOnce());
+    expect(queueControlledSend).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: "account-1", to: ["to@example.com"], editorMode: "rich", composeMode: "new", richTextHtml: "<p>Hello</p>",
+    }), { undoSeconds: 10 }, expect.any(String));
+    await screen.findByRole("button", { name: "sendControls.undo" });
+    expect(mocks.mutate).not.toHaveBeenCalled();
+    expect(deleteDraft).not.toHaveBeenCalled();
+    expect(mocks.flushDraftSave).toHaveBeenCalledOnce();
+  });
+
+  it("Undo restores staged attachments and editable compose without deleting the saved draft", async () => {
+    localStorage.setItem("pebble-undo-send-seconds", "10");
+    vi.mocked(queueControlledSend).mockResolvedValue({ id: "job", accountId: "account-1", subject: "Subject", dueAt: Math.floor(Date.now() / 1000) + 10, revision: 0, state: "pending", kind: "undo" });
+    vi.mocked(restoreControlledSend).mockResolvedValue({ accountId: "account-1", to: ["to@example.com"], cc: [], bcc: [], subject: "Subject", bodyText: "Hello", editorMode: "rich", composeMode: "reply-all", rawSource: "", richTextHtml: "<p>Hello</p>", quotedReplyHtml: "", attachments: [{ name: "restored.txt", path: "staged/new.txt", size: 10 }] });
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.click(await screen.findByRole("button", { name: "sendControls.undo" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false));
+    expect(screen.getByText("restored.txt")).toBeTruthy();
+    expect(deleteDraft).not.toHaveBeenCalled();
+    expect(mocks.resumeDraftSaves).toHaveBeenCalledOnce();
+    expect(mocks.closeCompose).not.toHaveBeenCalled();
+  });
+
+  it("does not claim cancellation succeeded when the worker already claimed the send", async () => {
+    localStorage.setItem("pebble-undo-send-seconds", "10");
+    vi.mocked(queueControlledSend).mockResolvedValue({ id: "job", accountId: "account-1", subject: "Subject", dueAt: Math.floor(Date.now() / 1000) + 10, revision: 0, state: "pending", kind: "undo" });
+    vi.mocked(restoreControlledSend).mockRejectedValue(new Error("already in flight"));
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.click(await screen.findByRole("button", { name: "sendControls.undo" }));
+    await waitFor(() => expect(screen.getAllByRole("alert").length).toBeGreaterThan(0));
+    expect(mocks.resumeDraftSaves).not.toHaveBeenCalled();
+    expect(deleteDraft).not.toHaveBeenCalled();
+  });
+
+  it("keeps an IPC-lost queue request id stable rather than creating a duplicate on retry", async () => {
+    localStorage.setItem("pebble-undo-send-seconds", "10");
+    vi.mocked(queueControlledSend).mockRejectedValue(new Error("IPC reply lost"));
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.resumeDraftSaves).toHaveBeenCalledOnce());
+    const requestId = vi.mocked(queueControlledSend).mock.calls[0][2];
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(queueControlledSend).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(queueControlledSend).mock.calls[1][2]).toBe(requestId);
+    expect(mocks.mutate).not.toHaveBeenCalled();
+  });
+
+  it("persists the chosen local schedule with durable source ownership before closing", async () => {
+    const due = new Date(Date.now() + 86400000);
+    const value = `${due.getFullYear()}-${String(due.getMonth()+1).padStart(2,"0")}-${String(due.getDate()).padStart(2,"0")}T12:30`;
+    const dueAt = new Date(value).getTime() / 1000;
+    vi.mocked(queueControlledSend).mockResolvedValue({ id: "job", accountId: "account-1", subject: "Subject", dueAt, revision: 0, state: "pending", kind: "scheduled" });
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "sendControls.schedule" }));
+    fireEvent.change(document.querySelector('input[type="datetime-local"]')!, { target: { value } });
+    fireEvent.click(screen.getAllByRole("button", { name: "sendControls.schedule" })[1]);
+    await waitFor(() => expect(mocks.closeCompose).toHaveBeenCalledOnce());
+    expect(queueControlledSend).toHaveBeenCalledWith(expect.objectContaining({ editorMode: "rich", bodyText: "Hello" }), { dueAt }, expect.any(String));
+    expect(deleteDraft).not.toHaveBeenCalled();
+    expect(mocks.mutate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original inert while an IPC-lost queue reply cannot be reconciled", async () => {
+    localStorage.setItem("pebble-undo-send-seconds", "10");
+    vi.mocked(queueControlledSend).mockRejectedValueOnce(new Error("IPC reply lost"));
+    vi.mocked(listControlledSends).mockRejectedValueOnce(new Error("offline"));
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("sendControls.queueReplyUnknown");
+    expect((screen.getByRole("button", { name: "Sending..." }) as HTMLButtonElement).disabled).toBe(true);
+    expect(mocks.resumeDraftSaves).not.toHaveBeenCalled();
+    expect(mocks.mutate).not.toHaveBeenCalled();
+    expect(deleteDraft).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a lost reply to the queued job while preserving source draft ownership", async () => {
+    localStorage.setItem("pebble-undo-send-seconds", "10");
+    vi.mocked(queueControlledSend).mockImplementationOnce(async (_snapshot, _options, id) => {
+      vi.mocked(listControlledSends).mockResolvedValueOnce([{ id, accountId: "account-1", subject: "Subject", dueAt: Math.floor(Date.now()/1000)+10, revision:0, state:"pending", kind:"undo" }]);
+      throw new Error("IPC reply lost");
+    });
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "sendControls.undo" });
+    expect(queueControlledSend).toHaveBeenCalledOnce();
+    expect(mocks.resumeDraftSaves).not.toHaveBeenCalled();
+    expect(mocks.mutate).not.toHaveBeenCalled();
+    expect(deleteDraft).not.toHaveBeenCalled();
   });
 
   it("shows a user-visible error when sent draft cleanup fails", async () => {
@@ -270,6 +418,64 @@ describe("ComposeView", () => {
 
     await act(async () => pendingDeletion.resolve());
     await waitFor(() => expect(mocks.closeCompose).toHaveBeenCalledOnce());
+  });
+
+  it.each(["send", "discard"])("clears deleted draft detail and singleton thread selection after %s", async (action) => {
+    useMailStore.setState({ selectedMessageId: "draft-1", selectedThreadId: "draft-1", selectedMessageIds: new Set(["draft-1", "unrelated"]) });
+    mocks.mutate.mockImplementation((_params, options) => options.onSuccess());
+    mocks.showComposeLeaveConfirm = action === "discard";
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: action === "send" ? "Send" : "Discard" }));
+    await waitFor(() => expect(deleteDraft).toHaveBeenCalledWith("account-1", "draft-1"));
+    await waitFor(() => expect(useMailStore.getState().selectedMessageId).toBeNull());
+    expect(useMailStore.getState().selectedThreadId).toBeNull();
+    expect([...useMailStore.getState().selectedMessageIds]).toEqual(["unrelated"]);
+  });
+
+  it("retains selected draft detail when successful delivery cannot delete the draft", async () => {
+    useMailStore.setState({ selectedMessageId: "draft-1", selectedThreadId: "draft-1" });
+    vi.mocked(deleteDraft).mockRejectedValue(new Error("cleanup failed"));
+    mocks.mutate.mockImplementation((_params, options) => options.onSuccess());
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.closeCompose).toHaveBeenCalledOnce());
+    expect(useMailStore.getState().selectedMessageId).toBe("draft-1");
+    expect(useMailStore.getState().selectedThreadId).toBe("draft-1");
+  });
+
+  it("does not clear a different message selected while draft deletion is pending", async () => {
+    useMailStore.setState({ selectedMessageId: "draft-1" });
+    const pending = deferred<void>();
+    vi.mocked(deleteDraft).mockReturnValue(pending.promise);
+    mocks.mutate.mockImplementation((_params, options) => options.onSuccess());
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(deleteDraft).toHaveBeenCalledOnce());
+    act(() => useMailStore.setState({ selectedMessageId: "another-message", selectedThreadId: "another-thread" }));
+    await act(async () => pending.resolve());
+    await waitFor(() => expect(mocks.closeCompose).toHaveBeenCalledOnce());
+    expect(useMailStore.getState().selectedMessageId).toBe("another-message");
+    expect(useMailStore.getState().selectedThreadId).toBe("another-thread");
+  });
+
+  it.each([true, false])("only clears a cached conversation if all its messages were deleted: %s", async (onlyDraft) => {
+    useMailStore.setState({ selectedThreadId: "conversation" });
+    queryClient.setQueryData(["threadMessages", "conversation"], onlyDraft ? [{ id: "draft-1" }] : [{ id: "draft-1" }, { id: "other" }]);
+    mocks.mutate.mockImplementation((_params, options) => options.onSuccess());
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.closeCompose).toHaveBeenCalledOnce());
+    expect(useMailStore.getState().selectedThreadId).toBe(onlyDraft ? null : "conversation");
+  });
+
+  it("clears the original resumed draft UUID after cleanup of its promoted remote identity", async () => {
+    mocks.composeDraft = { id: "original-uuid", accountId: "account-1", to: [], cc: [], bcc: [], subject: "Resumed", rawSource: "", richTextHtml: "", editorMode: "rich", attachments: [], savedAt: Date.now() };
+    useMailStore.setState({ selectedMessageId: "original-uuid" });
+    mocks.mutate.mockImplementation((_params, options) => options.onSuccess());
+    render(<ComposeView />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.closeCompose).toHaveBeenCalledOnce());
+    expect(useMailStore.getState().selectedMessageId).toBeNull();
   });
 
   it("validates a restored new-message draft against loaded account ids", () => {
@@ -554,11 +760,11 @@ describe("ComposeView", () => {
     rerender(<ComposeView />);
 
     const keepEditingButton = screen.getByRole("button", { name: "Keep editing" });
-    const discardButton = screen.getByRole("button", { name: "Discard" });
+    screen.getByRole("button", { name: "Discard" });
     expect(document.activeElement).toBe(keepEditingButton);
 
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(discardButton);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Save and close" }));
     fireEvent.keyDown(document, { key: "Tab" });
     expect(document.activeElement).toBe(keepEditingButton);
 

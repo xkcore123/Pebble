@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Clock, Languages } from "lucide-react";
 import { trustSender } from "@/lib/api";
+import ResumeDraftButton from "./ResumeDraftButton";
 import { useTranslation } from "react-i18next";
 import type { PrivacyMode, TranslateResult } from "@/lib/api";
 import { useClickOutside } from "@/hooks/useClickOutside";
@@ -11,6 +12,7 @@ import SnoozePopover from "../features/inbox/SnoozePopover";
 import { ShadowDomEmail } from "./ShadowDomEmail";
 import TranslatePopover from "../features/translate/TranslatePopover";
 import MessageActionToolbar from "./MessageActionToolbar";
+import MoveToButton from "./MoveToButton";
 import { useMessageLoader } from "@/hooks/useMessageLoader";
 import { useBilingualTranslation } from "@/hooks/useBilingualTranslation";
 import { defaultPrivacyMode } from "@/lib/privacyMode";
@@ -318,12 +320,14 @@ export default function MessageDetail({ messageId, onBack, folderRole }: Props) 
           </button>
         </div>
         {/* Action Toolbar */}
+        {message.is_draft && <ResumeDraftButton messageId={messageId} />}
         <MessageActionToolbar
           message={message}
           folderRole={folderRole}
           onBack={onBack}
           onMessageUpdate={setMessage}
         />
+        <div style={{ paddingLeft: "48px" }}><MoveToButton messages={[message]} showLabel onMoved={(ids) => {if (ids.includes(message.id)) onBack();}}/></div>
         <div style={{ paddingLeft: "32px" }}>
           <div
             style={{

@@ -3,6 +3,7 @@ mod commands;
 mod events;
 mod profile;
 mod realtime;
+mod send_controls;
 mod snooze_watcher;
 mod state;
 
@@ -22,6 +23,8 @@ static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLo
 const TRAY_SHOW_ID: &str = "tray-show";
 const TRAY_HIDE_ID: &str = "tray-hide";
 const TRAY_QUIT_ID: &str = "tray-quit";
+#[cfg(target_os = "macos")]
+const APPLICATION_QUIT_ID: &str = "application-quit";
 const DEEP_LINK_NEW_URL_EVENT: &str = "deep-link://new-url";
 
 #[derive(Default)]
@@ -169,6 +172,56 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(
         .build()
 }
 
+#[cfg(target_os = "macos")]
+fn setup_application_menu(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{AboutMetadata, MenuItem, PredefinedMenuItem, Submenu};
+
+    let package = app.package_info();
+    let menu = Menu::default(app)?;
+    let application_menu = Submenu::with_items(
+        app,
+        package.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(
+                app,
+                None,
+                Some(AboutMetadata {
+                    name: Some(package.name.clone()),
+                    version: Some(package.version.to_string()),
+                    copyright: app.config().bundle.copyright.clone(),
+                    authors: app.config().bundle.publisher.clone().map(|p| vec![p]),
+                    ..Default::default()
+                }),
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            // The predefined Quit action calls NSApplication::terminate directly,
+            // bypassing Tauri's cancellable ExitRequested event.
+            &MenuItem::with_id(
+                app,
+                APPLICATION_QUIT_ID,
+                format!("Quit {}", package.name),
+                true,
+                Some("CmdOrCtrl+Q"),
+            )?,
+        ],
+    )?;
+    menu.remove_at(0)?;
+    menu.prepend(&application_menu)?;
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id().as_ref() == APPLICATION_QUIT_ID {
+            app.exit(0);
+        }
+    });
+    Ok(())
+}
+
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = build_tray_menu(app, "Show Window", "Hide Window", "Quit Pebble")?;
     let icon = app
@@ -286,6 +339,8 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(commands::mail_archive::ArchiveJobs::default())
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -311,6 +366,8 @@ pub fn run() {
                     if keep_running {
                         api.prevent_close();
                         let _ = window.hide();
+                    } else if send_controls::prevent_exit(window.app_handle()) {
+                        api.prevent_close();
                     }
                 }
                 _ => {}
@@ -415,6 +472,9 @@ pub fn run() {
 
             let (snooze_stop_tx, snooze_stop_rx) = std::sync::mpsc::channel::<()>();
             app.manage(AppState::new(store, search, crypto, snooze_stop_tx, attachments_dir));
+            send_controls::setup(app.handle())?;
+            #[cfg(target_os = "macos")]
+            setup_application_menu(app.handle())?;
             log_startup_phase(startup_start, &mut startup_phase, "app state registered");
 
             // Start snooze watcher on the Tauri async runtime
@@ -557,6 +617,25 @@ pub fn run() {
             commands::accounts::test_pop3_connection,
             commands::accounts::test_account_connection,
             commands::folders::list_folders,
+            commands::folder_management::create_mail_folder,
+            commands::folder_management::rename_mail_folder,
+            commands::folder_management::move_mail_messages,
+            commands::folder_management::get_mail_move_context,
+            commands::folder_management::get_mail_folder_parents,
+            commands::folder_management::rename_mail_folder_namespace,
+            commands::mail_archive::mail_archive_choose_files,
+            commands::mail_archive::mail_archive_list,
+            commands::mail_archive::mail_archive_create,
+            commands::mail_archive::mail_archive_folders,
+            commands::mail_archive::mail_archive_create_folder,
+            commands::mail_archive::mail_archive_messages,
+            commands::mail_archive::mail_archive_read,
+            commands::mail_archive::mail_archive_update,
+            commands::mail_archive::mail_archive_delete,
+            commands::mail_archive::mail_archive_cancel,
+            commands::mail_archive::mail_archive_import,
+            commands::mail_archive::export::mail_archive_export,
+            commands::mail_archive::export::mail_archive_save_attachment,
             commands::folders::get_imap_sync_folders,
             commands::folders::update_imap_sync_folders,
             commands::messages::query::list_messages,
@@ -600,6 +679,13 @@ pub fn run() {
             commands::rules::update_rule,
             commands::rules::delete_rule,
             commands::compose::send_email,
+            send_controls::queue_controlled_send,
+            send_controls::list_controlled_sends,
+            send_controls::restore_controlled_send,
+            send_controls::reschedule_controlled_send,
+            send_controls::delete_controlled_send,
+            send_controls::resolve_send_control_exit,
+            send_controls::send_control_exit_pending,
             commands::compose::stage_compose_attachment,
             commands::compose::cleanup_staged_compose_attachment,
             commands::trusted_senders::trust_sender,
@@ -621,6 +707,8 @@ pub fn run() {
             commands::attachments::list_attachments,
             commands::attachments::get_attachment_path,
             commands::attachments::download_attachment,
+            commands::attachments::preview_attachment,
+            commands::attachments::save_all_attachments,
             commands::batch::batch_archive,
             commands::batch::batch_delete,
             commands::batch::batch_mark_read,
@@ -655,6 +743,8 @@ pub fn run() {
             commands::pending_mail_ops::list_pending_mail_ops,
             commands::pending_mail_ops::dismiss_failed_pending_mail_ops,
             commands::drafts::save_draft,
+            commands::drafts::get_draft,
+            commands::pending_mail_ops::retry_failed_send,
             commands::drafts::delete_draft,
             commands::folder_counts::get_folder_unread_counts,
             commands::user_data::list_email_templates,
@@ -664,8 +754,15 @@ pub fn run() {
             commands::user_data::set_email_signature,
             commands::user_data::migrate_email_signature_if_absent,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if send_controls::prevent_exit(app) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

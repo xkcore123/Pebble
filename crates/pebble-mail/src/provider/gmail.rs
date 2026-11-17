@@ -1,3 +1,6 @@
+#[path = "gmail_folders.rs"]
+mod folder_management;
+
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -277,6 +280,8 @@ impl GmailProvider {
         url: &str,
         body: &T,
     ) -> Result<reqwest::Response> {
+        #[cfg(test)]
+        let url = self.test_request_url(url);
         self.client
             .post(url)
             .bearer_auth(self.token())
@@ -809,11 +814,20 @@ impl FolderProvider for GmailProvider {
             .await
             .map_err(|e| PebbleError::Network(format!("Failed to parse labels: {e}")))?;
         let labels = label_list.labels.unwrap_or_default();
-        Ok(labels
+        let mut folders: Vec<Folder> = labels
             .iter()
             .filter(|l| !is_hidden_gmail_label(&l.id))
             .map(gmail_label_to_folder)
-            .collect())
+            .collect();
+        for folder in &mut folders {
+            folder.parent_id = folder.name.rsplit_once('/').and_then(|(parent, _)| {
+                labels
+                    .iter()
+                    .find(|l| l.name == parent)
+                    .map(|l| l.id.clone())
+            });
+        }
+        Ok(folders)
     }
 
     async fn move_message(&self, remote_id: &str, to_folder_id: &str) -> Result<String> {
@@ -859,9 +873,11 @@ impl LabelProvider for GmailProvider {
     }
 }
 
-#[async_trait]
-impl DraftProvider for GmailProvider {
-    async fn save_draft(&self, draft: &DraftMessage) -> Result<String> {
+impl GmailProvider {
+    pub async fn save_draft_with_message_id(
+        &self,
+        draft: &DraftMessage,
+    ) -> Result<(String, Option<String>)> {
         let raw = build_draft_raw(draft)?;
         let encoded = base64url_encode(&raw);
         let body = serde_json::json!({ "message": { "raw": encoded } });
@@ -872,10 +888,17 @@ impl DraftProvider for GmailProvider {
             .json()
             .await
             .map_err(|e| PebbleError::Network(format!("Failed to parse draft response: {e}")))?;
-        Ok(gmail_draft.id)
+        Ok((
+            gmail_draft.id,
+            gmail_draft.message.map(|message| message.id),
+        ))
     }
 
-    async fn update_draft(&self, draft_id: &str, draft: &DraftMessage) -> Result<()> {
+    pub async fn update_draft_with_message_id(
+        &self,
+        draft_id: &str,
+        draft: &DraftMessage,
+    ) -> Result<Option<String>> {
         let raw = build_draft_raw(draft)?;
         let encoded = base64url_encode(&raw);
         let body = serde_json::json!({ "message": { "raw": encoded } });
@@ -894,7 +917,25 @@ impl DraftProvider for GmailProvider {
                 "Failed to update draft (status {status})"
             )));
         }
-        Ok(())
+        let gmail_draft: GmailDraft = resp.json().await.map_err(|e| {
+            PebbleError::Network(format!("Failed to parse updated draft response: {e}"))
+        })?;
+        Ok(gmail_draft.message.map(|message| message.id))
+    }
+}
+
+#[async_trait]
+impl DraftProvider for GmailProvider {
+    async fn save_draft(&self, draft: &DraftMessage) -> Result<String> {
+        self.save_draft_with_message_id(draft)
+            .await
+            .map(|(id, _)| id)
+    }
+
+    async fn update_draft(&self, draft_id: &str, draft: &DraftMessage) -> Result<()> {
+        self.update_draft_with_message_id(draft_id, draft)
+            .await
+            .map(|_| ())
     }
 
     async fn delete_draft(&self, draft_id: &str) -> Result<()> {
@@ -1520,6 +1561,18 @@ fn base64url_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_save_responses_keep_distinct_draft_and_message_ids() {
+        for message_id in ["message-created", "message-after-update"] {
+            let draft: GmailDraft = serde_json::from_value(serde_json::json!({
+                "id": "draft-stable", "message": { "id": message_id, "threadId": "thread" }
+            }))
+            .unwrap();
+            assert_eq!(draft.id, "draft-stable");
+            assert_eq!(draft.message.unwrap().id, message_id);
+        }
+    }
 
     #[test]
     fn gmail_sync_range_query_is_encoded_on_every_page() {

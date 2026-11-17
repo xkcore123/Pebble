@@ -12,6 +12,7 @@ import { useConfirmStore } from "@/stores/confirm.store";
 import { roleForSelection } from "@/lib/folderAggregation";
 import { assignAccountColors, getAccountColor, getAccountLabel } from "@/lib/accountColors";
 import MessageItem from "./MessageItem";
+import MoveToButton from "./MoveToButton";
 import { MessageListSkeleton } from "./Skeleton";
 
 interface Props {
@@ -131,9 +132,14 @@ export default function MessageList({
     if (ids.length === 0) return;
     if (action === "delete") {
       const count = ids.length;
+      const includesLocalDraft = ids.some((id) => {
+        const message = messages.find((message) => message.id === id);
+        return !message || (message.is_draft && message.remote_id === "");
+      });
       const ok = await confirm({
         title: t("batch.deleteTitle", { count, defaultValue: `Delete ${count} messages?` }),
-        message: t("batch.deleteConfirm", {
+        message: includesLocalDraft ? t("batch.deleteWithLocalDraftsConfirm",
+          "Local-only drafts in this selection will be permanently deleted and cannot be restored. Other messages will move to Trash.") : t("batch.deleteConfirm", {
           count,
           defaultValue: `This will move ${count} message(s) to Trash. This action can be undone by restoring from Trash.`,
         }),
@@ -189,6 +195,7 @@ export default function MessageList({
           </label>
           {selectedMessageIds.size > 0 && (
             <>
+              <MoveToButton messages={messages.filter((m) => selectedMessageIds.has(m.id))} disabled={batchLoading || [...selectedMessageIds].some((id) => !messageIds.includes(id))}/>
               <BatchBtn icon={Archive} label={t("messageActions.archive")} onClick={() => handleBatchAction("archive")} disabled={batchLoading} />
               <BatchBtn icon={Trash2} label={t("common.delete")} onClick={() => handleBatchAction("delete")} disabled={batchLoading} />
               <BatchBtn icon={MailOpen} label={t("batch.markRead")} onClick={() => handleBatchAction("markRead")} disabled={batchLoading} />
