@@ -2672,6 +2672,25 @@ index 5a9481bffa9d5d17ce17f062481bc9878f84cbd8..b2578a05f8cc128dfb7d549ee1e95971
        unlisten.then((fn) => fn());
      };
    }, [setLastMailError]);
+diff --git a/src/features/mail-archive/MailArchiveView.tsx b/src/features/mail-archive/MailArchiveView.tsx
+index 7ea1722e1bcdd09855b50fbfd7bd84457461ff78..ea177c64822aec10739eafcdd553374e06d015e3 100644
+--- a/src/features/mail-archive/MailArchiveView.tsx
++++ b/src/features/mail-archive/MailArchiveView.tsx
+@@ -47,7 +47,13 @@ export default function MailArchiveView() {
+   const messages = useQuery({ queryKey: [...ROOT, archiveId, folderId, search, offset], queryFn: () => api.listArchiveMessages(archiveId, folderId, search, offset), enabled: !!archiveId && !!folderId });
+   const detail = useQuery({ queryKey: [...ROOT, archiveId, "message", messageId], queryFn: () => api.readArchiveMessage(archiveId, messageId), enabled: !!messageId && !!archiveId });
+ 
+-  useEffect(() => { const timer = setTimeout(() => { setSearch(query); setOffset(0); setSelected([]); setMessageId(""); }, 250); return () => clearTimeout(timer); }, [query]);
++  useEffect(() => {
++    // No query change means no browser reset. In particular, mounting with an
++    // empty query must not close a message opened during the first 250 ms.
++    if (query === search) return;
++    const timer = setTimeout(() => { setSearch(query); setOffset(0); setSelected([]); setMessageId(""); }, 250);
++    return () => clearTimeout(timer);
++  }, [query, search]);
+   useEffect(() => {
+     const registration = listen<api.ArchiveProgress>("mail-archive:progress", ({ payload }) => { if (payload.job_id === job.current) setProgress(payload); });
+     return () => { void registration.then((unlisten) => unlisten()).catch(() => {}); if (job.current) void api.cancelArchiveJob(job.current).catch(() => {}); };
 diff --git a/src/locales/en.json b/src/locales/en.json
 index 198f6e99ef66f5170ca8c8c4086f803fbda27431..b645749a042c4e21390e264a6fec91f465951ce1 100644
 --- a/src/locales/en.json
@@ -2858,6 +2877,51 @@ index 5cb9ce37539bd352e01df4f5c86413c118f2185a..742944c81d88c72d3870fc5c5b759ce3
    it("reports a sync error when a sync pass fails", async () => {
      render(<StatusBar />);
  
+diff --git a/tests/features/mail-archive/MailArchiveView.test.tsx b/tests/features/mail-archive/MailArchiveView.test.tsx
+index ddfbd5a12cdae00597c4ef67081150525b178c10..6a3f2996614e11297da38906b4b6cd3b5e153948 100644
+--- a/tests/features/mail-archive/MailArchiveView.test.tsx
++++ b/tests/features/mail-archive/MailArchiveView.test.tsx
+@@ -22,12 +22,12 @@ vi.mock("../../../src/hooks/queries", () => ({
+ vi.mock("../../../src/stores/mail.store", () => ({ useMailStore: (selector: (s: object) => unknown) => selector({ activeAccountId: "account", selectedMessageId: null, selectedMessageIds: new Set(["remote-selected"]) }) }));
+ vi.mock("../../../src/stores/confirm.store", () => ({ useConfirmStore: { getState: () => ({ confirm: mocks.confirm }) } }));
+ 
+-async function renderView(language = "en") {
++async function renderView(language = "en", waitForMessages = true) {
+   const i18n = createInstance();
+   await i18n.init({ lng: language, fallbackLng: "en", resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
+   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+   render(<I18nextProvider i18n={i18n}><QueryClientProvider client={client}><MailArchiveView /></QueryClientProvider></I18nextProvider>);
+-  await screen.findByRole("button", { name: /Subject A — sender@example.com/ });
++  if (waitForMessages) await screen.findByRole("button", { name: /Subject A — sender@example.com/ });
+   return client;
+ }
+ 
+@@ -46,6 +46,25 @@ describe("Local mail archive browser", () => {
+   });
+   afterEach(() => cleanup());
+ 
++  it("does not clear an opened message when the unchanged initial search debounce expires", async () => {
++    vi.useFakeTimers();
++    try {
++      await renderView("en", false);
++      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
++      fireEvent.click(screen.getByRole("button", { name: /Subject A — sender@example.com/ }));
++      await act(async () => { await vi.advanceTimersByTimeAsync(5); });
++      expect(screen.getByRole("article", { name: "Archived message" })).toBeTruthy();
++      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++      expect(screen.getByRole("article", { name: "Archived message" })).toBeTruthy();
++      fireEvent.change(screen.getByRole("searchbox"), { target: { value: "new query" } });
++      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++      expect(screen.queryByRole("article")).toBeNull();
++      expect(mocks.listArchiveMessages).toHaveBeenCalledWith("archive", "local", "new query", 0);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
+   it("states local-only/search boundaries and renders untrusted mail strictly as text", async () => {
+     await renderView();
+     expect(screen.getByText(en.mailArchive.localOnly)).toBeTruthy();
 diff --git a/tests/features/settings/AccountsTab.imap-folders.test.tsx b/tests/features/settings/AccountsTab.imap-folders.test.tsx
 index 234eb177824b0a56fe95a3ac5ee6985269c7f38a..672bf49f5f4f8824643a2f6152b09529d983e96b 100644
 --- a/tests/features/settings/AccountsTab.imap-folders.test.tsx

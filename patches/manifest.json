@@ -2,7 +2,7 @@
   "base_commit": "ee291693bda113767b59bbd291288084801e4a50",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "d6a4538913c88ecb483506ecfbe9fab04ac047abeca8673b374b30143ae69939",
+  "sha256": "521c479f8173aa15d4974a78f8da65d0355444e1641cd636efc85f8606fd4f81",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
@@ -15,10 +15,12 @@
     "src-tauri/src/commands/sync_cmd.rs",
     "src/components/MessageList.tsx",
     "src/components/StatusBar.tsx",
+    "src/features/mail-archive/MailArchiveView.tsx",
     "src/locales/en.json",
     "src/locales/zh.json",
     "tests/components/MessageList.test.tsx",
     "tests/components/StatusBar.realtime.test.tsx",
+    "tests/features/mail-archive/MailArchiveView.test.tsx",
     "tests/features/settings/AccountsTab.imap-folders.test.tsx"
   ],
   "supplemental_fixes": [
@@ -58,6 +60,15 @@
       ],
       "description": "Rebase repairs onto upstream folder management/draft safeguards without losing guarded LIST delimiter/system metadata or local draft deletion accounting. Manual full-sync failures now schedule the same bounded retry as timed reconciliation; repeated failed IDLE cycles fall back to polling, and successful LOGIN no longer resets the IDLE failure streak. Add live loopback manual-retry/IDLE-fallback tests, hierarchy metadata and retry-schedule regressions.",
       "validation_note": "Use compare_exchange_weak for portable atomic fault injection across Rust stable versions."
+    },
+    {
+      "date": "2026-11-17",
+      "based_on_commit": "36a3b78b4235b891f9e484b2e2141cf76620ff89",
+      "files": [
+        "src/features/mail-archive/MailArchiveView.tsx",
+        "tests/features/mail-archive/MailArchiveView.test.tsx"
+      ],
+      "description": "Do not reset archive selection/detail when unchanged initial search debounce fires. Fake-clock regression fails against original source and passes after fix; real query changes still clear stale detail."
     }
   ],
   "original_base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97"
