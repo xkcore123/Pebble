@@ -66,7 +66,11 @@ test("upstream conflicts fail rather than silently dropping a fix", (t) => {
   writeFileSync(join(f.cwd, "app.txt"), "changed upstream\n");
   f.git("add", "app.txt");
   f.git("commit", "-m", "Changed upstream");
-  assert.throws(() => f.run("apply"), /does not apply cleanly/);
+  assert.throws(() => f.run("apply"), (error) => {
+    assert.match(error.message, /does not apply cleanly/);
+    assert.match(error.message, /app\.txt/);
+    return true;
+  });
   assert.equal(f.content(), "changed upstream\n");
 });
 

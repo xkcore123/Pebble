@@ -11,7 +11,7 @@ export function pebblePatch(cwd, mode = "check", log = console.log) {
     const result = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
     if (result.error) throw result.error;
     if (result.status !== 0 && !optional) throw new Error(result.stderr.trim() || "Git command failed");
-    return { ok: result.status === 0, text: result.stdout.trim() };
+    return { ok: result.status === 0, text: result.stdout.trim(), error: result.stderr.trim() };
   }
   const manifest = JSON.parse(readFileSync(join(cwd, "patches", "manifest.json"), "utf8"));
   if (manifest.patch !== "pebble-fixes.patch") throw new Error("Unexpected patch path");
@@ -23,8 +23,9 @@ export function pebblePatch(cwd, mode = "check", log = console.log) {
     const tracked = git(["status", "--porcelain", "--untracked-files=no"]).text;
     if (tracked) throw new Error("Tracked files are modified (or patch is already applied). Commit/stash work first.");
   }
-  if (!git(["apply", ...flags, "--check", patch], true).ok) {
-    throw new Error("Patch does not apply cleanly. No files changed. Review upstream changes; never skip failed hunks.");
+  const check = git(["apply", ...flags, "--check", patch], true);
+  if (!check.ok) {
+    throw new Error("Patch does not apply cleanly. No files changed. Review upstream changes; never skip failed hunks.\n" + check.error);
   }
   if (mode !== "check") git(["apply", ...flags, patch]);
   log(mode === "check" ? "Patch verified; source unchanged." :

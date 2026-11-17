@@ -1,8 +1,8 @@
 {
-  "base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97",
+  "base_commit": "ee291693bda113767b59bbd291288084801e4a50",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "8771966a95e3d5e53590c8dde945fe737ab0c8b38bc9c09856c6538159d4c8fa",
+  "sha256": "bbdefae56d3b048f250c9ea422fb4b85d8edaae605117b8e309c5dc6572253cf",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
@@ -41,6 +41,23 @@
       ],
       "description": "Publish ordered account health recovery after successful sync passes; retain full-reconcile failures across Inbox-only success; retry failed full reconciliation with independent capped backoff and make manual sync a full pass. Add double-BYE recovery and account-status regressions.",
       "validation_note": "Double-BYE fixture counts actual SELECT failures rather than platform-dependent accepted TCP connections; recovery assertions verify subsequent SELECT completion."
+    },
+    {
+      "date": "2026-11-17",
+      "based_on_commit": "b9b0de432f3e7cc00a034e134a2852391c51e377",
+      "upstream_commit": "ee291693bda113767b59bbd291288084801e4a50",
+      "files": [
+        "crates/pebble-mail/src/imap.rs",
+        "crates/pebble-mail/src/sync.rs",
+        "crates/pebble-mail/src/test_imap.rs",
+        "src-tauri/src/commands/batch.rs",
+        "src/components/MessageList.tsx",
+        "src/locales/en.json",
+        "src/locales/zh.json",
+        "tests/components/MessageList.test.tsx"
+      ],
+      "description": "Rebase repairs onto upstream folder management/draft safeguards without losing guarded LIST delimiter/system metadata or local draft deletion accounting. Manual full-sync failures now schedule the same bounded retry as timed reconciliation; repeated failed IDLE cycles fall back to polling, and successful LOGIN no longer resets the IDLE failure streak. Add live loopback manual-retry/IDLE-fallback tests, hierarchy metadata and retry-schedule regressions."
     }
-  ]
+  ],
+  "original_base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97"
 }
