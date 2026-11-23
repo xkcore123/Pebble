@@ -2430,6 +2430,28 @@ index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..c33e8ac54d0dd11c6ec5922c719404a4
      #[test]
      fn batch_local_commit_ids_include_remote_successes_and_queued_connection_failures_in_request_order(
      ) {
+diff --git a/src-tauri/src/commands/folder_management.rs b/src-tauri/src/commands/folder_management.rs
+index 30b68cf8640d0d71e80684d5871aacee83d28cfc..24116dad95af11b61d1d43c4a3180e03c8986d71 100644
+--- a/src-tauri/src/commands/folder_management.rs
++++ b/src-tauri/src/commands/folder_management.rs
+@@ -1078,6 +1078,17 @@ mod tests {
+                         ""
+                     };
+                     data = format!("* SEARCH{hit}\r\n");
++                } else if command.contains("BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]") {
++                    let uid = command.split_whitespace().nth(2).unwrap();
++                    let header = match (selected.contains("Source"), moved, uid) {
++                        (true, false, "5") | (false, true, "2") => Some("<move@example.invalid>"),
++                        (false, _, "5") => Some("<neighbor@example.invalid>"),
++                        _ => None,
++                    };
++                    if let Some(header) = header {
++                        let fields = format!("Message-ID: {header}\r\n\r\n");
++                        data = format!("* 1 FETCH (UID {uid} BODY[HEADER.FIELDS (MESSAGE-ID)] {{{}}}\r\n{fields})\r\n", fields.len());
++                    }
+                 } else if command.starts_with("UID MOVE") {
+                     moved = true;
+                 } else if command == "LIST \"\" \"\"" {
 diff --git a/src-tauri/src/commands/messages/lifecycle.rs b/src-tauri/src/commands/messages/lifecycle.rs
 index 72eda44539239b5fa7de796bde3dc6cf7f82eaf7..5f4a9a623a6941678b735d035e63d77a23ab7091 100644
 --- a/src-tauri/src/commands/messages/lifecycle.rs

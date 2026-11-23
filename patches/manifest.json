@@ -2,7 +2,7 @@
   "base_commit": "ee291693bda113767b59bbd291288084801e4a50",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "b7c0e3327e4406b1c97eb2e9701a30ef404f894bcea2dc3852b9656ec1464ed6",
+  "sha256": "67d138bb24be0cbbb5dcc0f09289e7f6bb26e8e6b2639c30da55f8f088b01b5c",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
@@ -10,6 +10,7 @@
     "crates/pebble-mail/src/test_imap.rs",
     "crates/pebble-store/src/pending_ops.rs",
     "src-tauri/src/commands/batch.rs",
+    "src-tauri/src/commands/folder_management.rs",
     "src-tauri/src/commands/messages/lifecycle.rs",
     "src-tauri/src/commands/messages/mod.rs",
     "src-tauri/src/commands/oauth.rs",
@@ -80,9 +81,11 @@
         "crates/pebble-mail/src/test_imap.rs",
         "crates/pebble-store/src/pending_ops.rs",
         "src-tauri/src/commands/batch.rs",
-        "src-tauri/src/commands/messages/mod.rs"
+        "src-tauri/src/commands/messages/mod.rs",
+        "src-tauri/src/commands/folder_management.rs"
       ],
-      "description": "Verify tagged SEARCH and FETCH completion, resolve exact Message-ID headers in batches when the server rejects header search, and coalesce repeated failed trash requests. Cover move recovery, ambiguous identity and partial command failure on loopback."
+      "description": "Verify tagged SEARCH and FETCH completion, resolve exact Message-ID headers in batches when the server rejects header search, and coalesce repeated failed trash requests. Cover move recovery, ambiguous identity and partial command failure on loopback.",
+      "validation_note": "The existing managed move server models source/destination header fetches as well as SEARCH. Its UID neighbor and replay assertions remain unchanged."
     }
   ],
   "original_base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97"
