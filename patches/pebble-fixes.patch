@@ -1990,6 +1990,128 @@ index 0000000000000000000000000000000000000000..2a4d599a3fe07e84dd51e00aaf5e782b
 +            .count()
 +    }
 +}
+diff --git a/crates/pebble-store/src/messages.rs b/crates/pebble-store/src/messages.rs
+index ae7526df63d3fef20af6773dc1fa4fbd6f61a1eb..b150508f57b49e8b14a2de7721344882ee66b725 100644
+--- a/crates/pebble-store/src/messages.rs
++++ b/crates/pebble-store/src/messages.rs
+@@ -801,6 +801,39 @@ impl Store {
+     ) -> Result<()> {
+         self.with_write(|conn| {
+             let tx = conn.unchecked_transaction()?;
++            // A sync pass can cache the destination between remote MOVE and
++            // this local commit. Merge only the already-verified same identity;
++            // a reused UID or a different message must still fail atomically.
++            let duplicate: Option<(String, Option<String>, Option<String>)> = tx.query_row(
++                "SELECT cached.id, cached.message_id_header, original.message_id_header
++                 FROM messages original JOIN accounts a ON a.id=original.account_id
++                 JOIN messages cached ON cached.account_id=original.account_id
++                 JOIN message_folders mf ON mf.message_id=cached.id
++                 WHERE original.id=?1 AND cached.id!=?1 AND a.provider='imap'
++                   AND mf.folder_id=?2 AND cached.remote_id=?3 AND cached.is_deleted=0",
++                params![message_id,target_folder_id,new_remote_id],
++                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
++            ).optional()?;
++            if let Some((cached_id, cached_header, original_header)) = duplicate {
++                if original_header.as_deref().is_none_or(|h| h.trim().is_empty())
++                    || cached_header != original_header {
++                    return Err(PebbleError::Storage("Destination UID belongs to a different IMAP message".into()));
++                }
++                let other_folders: i64 = tx.query_row(
++                    "SELECT COUNT(*) FROM message_folders WHERE message_id=?1 AND folder_id!=?2",
++                    params![cached_id,target_folder_id], |row| row.get(0))?;
++                if other_folders != 0 {
++                    return Err(PebbleError::Storage("Destination cache has additional folder memberships".into()));
++                }
++                tx.execute("UPDATE messages SET has_attachments=MAX(has_attachments,(SELECT has_attachments FROM messages WHERE id=?2)) WHERE id=?1", params![message_id,cached_id])?;
++                tx.execute("UPDATE attachments SET message_id=?1 WHERE message_id=?2", params![message_id,cached_id])?;
++                tx.execute("INSERT OR IGNORE INTO message_labels (message_id,label_id) SELECT ?1,label_id FROM message_labels WHERE message_id=?2", params![message_id,cached_id])?;
++                tx.execute("INSERT OR IGNORE INTO kanban_cards (message_id,column_name,position,created_at,updated_at) SELECT ?1,column_name,position,created_at,updated_at FROM kanban_cards WHERE message_id=?2", params![message_id,cached_id])?;
++                tx.execute("INSERT OR IGNORE INTO snoozed_messages (message_id,snoozed_at,unsnoozed_at,return_to) SELECT ?1,snoozed_at,unsnoozed_at,return_to FROM snoozed_messages WHERE message_id=?2", params![message_id,cached_id])?;
++                tx.execute("UPDATE pending_mail_ops SET message_id=?1 WHERE message_id=?2", params![message_id,cached_id])?;
++                tx.execute("DELETE FROM messages WHERE id=?1", params![cached_id])?;
++                tx.execute("INSERT OR REPLACE INTO search_pending (message_id,operation,created_at) VALUES (?1,'remove',?3),(?2,'index',?3)", params![cached_id,message_id,pebble_core::now_timestamp()])?;
++            }
+             tx.execute(
+                 "DELETE FROM message_folders WHERE message_id = ?1",
+                 params![message_id],
+@@ -2080,14 +2113,75 @@ mod remote_id_scope_tests {
+         );
+     }
+ 
++    #[test]
++    fn move_merges_concurrent_destination_cache_and_preserves_references() {
++        let store = Store::open_in_memory().unwrap();
++        let account = make_account();
++        let inbox = make_folder(&account.id, "INBOX", FolderRole::Inbox, 0);
++        let trash = make_folder(&account.id, "Trash", FolderRole::Trash, 1);
++        store.insert_account(&account).unwrap();
++        store.insert_folder(&inbox).unwrap();
++        store.insert_folder(&trash).unwrap();
++        let mut original = make_message(&account.id, "5");
++        original.message_id_header = Some("<same@example.invalid>".into());
++        let mut cached = make_message(&account.id, "42");
++        cached.message_id_header = original.message_id_header.clone();
++        store
++            .insert_message(&original, std::slice::from_ref(&inbox.id))
++            .unwrap();
++        store
++            .insert_message(&cached, std::slice::from_ref(&trash.id))
++            .unwrap();
++        store
++            .insert_attachment(&Attachment {
++                id: "cached-file".into(),
++                message_id: cached.id.clone(),
++                filename: "file.txt".into(),
++                mime_type: "text/plain".into(),
++                size: 1,
++                local_path: None,
++                content_id: None,
++                is_inline: false,
++            })
++            .unwrap();
++        store
++            .insert_pending_mail_op(&account.id, &cached.id, "update_flags", "{}")
++            .unwrap();
++        store.soft_delete_message(&original.id).unwrap();
++        store
++            .move_message_to_folder_with_remote_id(&original.id, &trash.id, "42")
++            .unwrap();
++        assert!(store.get_message(&cached.id).unwrap().is_none());
++        let moved = store.get_message(&original.id).unwrap().unwrap();
++        assert_eq!(moved.remote_id, "42");
++        assert!(!moved.is_deleted);
++        assert_eq!(
++            store.get_message_folder_ids(&original.id).unwrap(),
++            vec![trash.id.clone()]
++        );
++        assert_eq!(store.list_attachments(&original.id).unwrap().len(), 1);
++        assert_eq!(
++            store.list_pending_mail_ops(&account.id).unwrap()[0].message_id,
++            original.id
++        );
++        let pending = store.list_search_pending().unwrap();
++        assert!(pending.contains(&(cached.id, "remove".into())));
++        assert!(pending.contains(&(original.id.clone(), "index".into())));
++        store
++            .move_message_to_folder_with_remote_id(&original.id, &trash.id, "42")
++            .unwrap();
++    }
++
+     #[test]
+     fn move_with_duplicate_destination_uid_rolls_back() {
+         let store = Store::open_in_memory().unwrap();
+         let account = make_account();
+         let inbox = make_folder(&account.id, "INBOX", FolderRole::Inbox, 0);
+         let archive = make_folder(&account.id, "Archive", FolderRole::Archive, 1);
+-        let moved = make_message(&account.id, "5");
+-        let neighbor = make_message(&account.id, "2");
++        let mut moved = make_message(&account.id, "5");
++        let mut neighbor = make_message(&account.id, "2");
++        moved.message_id_header = Some("<moving@example.invalid>".into());
++        neighbor.message_id_header = Some("<neighbor@example.invalid>".into());
+         store.insert_account(&account).unwrap();
+         store.insert_folder(&inbox).unwrap();
+         store.insert_folder(&archive).unwrap();
 diff --git a/crates/pebble-store/src/pending_ops.rs b/crates/pebble-store/src/pending_ops.rs
 index 8440d4b91232a8f0884364ba998fb3d2678e2be2..120c4ab2aefc98269475b66dd5eb0604024098cd 100644
 --- a/crates/pebble-store/src/pending_ops.rs
@@ -2632,10 +2754,21 @@ index 72eda44539239b5fa7de796bde3dc6cf7f82eaf7..5f4a9a623a6941678b735d035e63d77a
                              &state,
                              &msg,
 diff --git a/src-tauri/src/commands/messages/mod.rs b/src-tauri/src/commands/messages/mod.rs
-index 206042546adc8dbc73bf20f2b1d0bde6e4f0a335..bd97bb29d90c3b63df8b741089f3912fc669a62a 100644
+index 206042546adc8dbc73bf20f2b1d0bde6e4f0a335..36b2bb684c833c5d0a11391d04c33287b0f19573 100644
 --- a/src-tauri/src/commands/messages/mod.rs
 +++ b/src-tauri/src/commands/messages/mod.rs
-@@ -145,6 +145,15 @@ pub(super) fn queue_pending_remote_op(
+@@ -102,7 +102,9 @@ pub(super) async fn imap_move_tracked(
+         &message.id,
+         &target_folder.id,
+         &target_uid.to_string(),
+-    )
++    )?;
++    crate::commands::indexing::recover_pending_search_operations(&state.store, &state.search)?;
++    Ok(())
+ }
+ 
+ pub(super) fn remote_mutation_allows_local_commit(outcome: RemoteMutationOutcome) -> bool {
+@@ -145,6 +147,15 @@ pub(super) fn queue_pending_remote_op(
          "op": op_type,
          "payload": payload,
      });

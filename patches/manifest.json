@@ -2,12 +2,13 @@
   "base_commit": "ee291693bda113767b59bbd291288084801e4a50",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "febc8afe6fdd839ea946989d087b3e9648b81886d65a2a8b94a5c9216586b6d4",
+  "sha256": "b00ef38832f111b0a793372c3218858cf1b9ddb0124edaace768a3632b799f1b",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
     "crates/pebble-mail/src/sync.rs",
     "crates/pebble-mail/src/test_imap.rs",
+    "crates/pebble-store/src/messages.rs",
     "crates/pebble-store/src/pending_ops.rs",
     "src-tauri/src/commands/batch.rs",
     "src-tauri/src/commands/folder_management.rs",
@@ -83,9 +84,10 @@
         "src-tauri/src/commands/batch.rs",
         "src-tauri/src/commands/messages/mod.rs",
         "src-tauri/src/commands/folder_management.rs",
-        "crates/pebble-mail/src/sync.rs"
+        "crates/pebble-mail/src/sync.rs",
+        "crates/pebble-store/src/messages.rs"
       ],
-      "description": "Verify tagged SEARCH and FETCH completion, resolve exact Message-ID headers in batches when the server rejects header search, and coalesce repeated failed trash requests. Cover move recovery, ambiguous identity and partial command failure on loopback. Also validate tagged completion for sync UID searches so failed/partial UID inventories cannot soft-delete cached mail; regression covers NO, BAD, disconnect and a genuinely empty mailbox.",
+      "description": "Verify tagged SEARCH and FETCH completion, resolve exact Message-ID headers in batches when the server rejects header search, and coalesce repeated failed trash requests. Cover move recovery, ambiguous identity and partial command failure on loopback. Also validate tagged completion for sync UID searches so failed/partial UID inventories cannot soft-delete cached mail; regression covers NO, BAD, disconnect and a genuinely empty mailbox. Resolve the local MOVE/sync race by atomically merging a verified same-Message-ID destination cache, preserving attachment and user metadata references plus durable search-index recovery; unrelated destination UID collisions still roll back.",
       "validation_note": "The existing managed move server models source/destination header fetches as well as SEARCH. Its UID neighbor and replay assertions remain unchanged."
     }
   ],
