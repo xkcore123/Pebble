@@ -1991,7 +1991,7 @@ index 0000000000000000000000000000000000000000..2a4d599a3fe07e84dd51e00aaf5e782b
 +    }
 +}
 diff --git a/crates/pebble-store/src/messages.rs b/crates/pebble-store/src/messages.rs
-index ae7526df63d3fef20af6773dc1fa4fbd6f61a1eb..b150508f57b49e8b14a2de7721344882ee66b725 100644
+index ae7526df63d3fef20af6773dc1fa4fbd6f61a1eb..3ad1d6bfa2efc0d3cea089d708b008e1d10fb6f0 100644
 --- a/crates/pebble-store/src/messages.rs
 +++ b/crates/pebble-store/src/messages.rs
 @@ -801,6 +801,39 @@ impl Store {
@@ -2034,7 +2034,7 @@ index ae7526df63d3fef20af6773dc1fa4fbd6f61a1eb..b150508f57b49e8b14a2de7721344882
              tx.execute(
                  "DELETE FROM message_folders WHERE message_id = ?1",
                  params![message_id],
-@@ -2080,14 +2113,75 @@ mod remote_id_scope_tests {
+@@ -2080,14 +2113,81 @@ mod remote_id_scope_tests {
          );
      }
  
@@ -2084,7 +2084,13 @@ index ae7526df63d3fef20af6773dc1fa4fbd6f61a1eb..b150508f57b49e8b14a2de7721344882
 +            store.get_message_folder_ids(&original.id).unwrap(),
 +            vec![trash.id.clone()]
 +        );
-+        assert_eq!(store.list_attachments(&original.id).unwrap().len(), 1);
++        assert_eq!(
++            store
++                .list_attachments_by_message(&original.id)
++                .unwrap()
++                .len(),
++            1
++        );
 +        assert_eq!(
 +            store.list_pending_mail_ops(&account.id).unwrap()[0].message_id,
 +            original.id

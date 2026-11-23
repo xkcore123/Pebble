@@ -2,7 +2,7 @@
   "base_commit": "ee291693bda113767b59bbd291288084801e4a50",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "b00ef38832f111b0a793372c3218858cf1b9ddb0124edaace768a3632b799f1b",
+  "sha256": "a4c3aa3a7aa281afc09be18d3bb5235e9951714cf7db880d5df102697b9b33da",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
