@@ -1,5 +1,5 @@
 diff --git a/crates/pebble-mail/src/imap.rs b/crates/pebble-mail/src/imap.rs
-index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb1823e372156 100644
+index 8821706280df8b7abbfb47b25c1955ca6965b65f..ce23ed104fa9d33fddc539282c7067a532841285 100644
 --- a/crates/pebble-mail/src/imap.rs
 +++ b/crates/pebble-mail/src/imap.rs
 @@ -337,11 +337,22 @@ type ImapSession = async_imap::Session<PrefixedStream<InnerStream>>;
@@ -64,7 +64,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb182
 +    }
 +}
 +
-+async fn identity_candidates(
++async fn checked_uid_search(
 +    sess: &mut ImapSession,
 +    criteria: &str,
 +) -> async_imap::error::Result<Vec<u32>> {
@@ -98,9 +98,9 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb182
 +        "HEADER \"Message-ID\" \"{}\"",
 +        header.replace('\\', "\\\\").replace('"', "\\\"")
 +    );
-+    let mut candidates = match identity_candidates(sess, &criteria).await {
++    let mut candidates = match checked_uid_search(sess, &criteria).await {
 +        Ok(ids) => ids,
-+        Err(Error::No(_) | Error::Bad(_)) => identity_candidates(sess, "ALL")
++        Err(Error::No(_) | Error::Bad(_)) => checked_uid_search(sess, "ALL")
 +            .await
 +            .map_err(|e| PebbleError::Network(format!("UID SEARCH ALL failed: {e}")))?,
 +        Err(e) => return Err(PebbleError::Network(format!("UID SEARCH failed: {e}"))),
@@ -343,6 +343,24 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb182
      /// Fetch raw message bytes from a mailbox.
      /// Returns a list of `(uid, raw_bytes)` pairs.
      pub async fn fetch_messages_raw(
+@@ -1318,7 +1551,7 @@ impl ImapProvider {
+                     let searched_uids: Vec<u32> = with_imap_timeout(
+                         "UID SEARCH",
+                         IMAP_COMMAND_TIMEOUT_SECS,
+-                        $s.uid_search(&search_query),
++                        checked_uid_search($s, &search_query),
+                     )
+                     .await?
+                     .into_iter()
+@@ -1428,7 +1661,7 @@ impl ImapProvider {
+         let mut uids = with_imap_timeout(
+             "UID SEARCH",
+             IMAP_COMMAND_TIMEOUT_SECS,
+-            sess.uid_search(&criteria),
++            checked_uid_search(sess, &criteria),
+         )
+         .await?
+         .into_iter()
 @@ -1686,124 +1919,94 @@ impl ImapProvider {
              .as_mut()
              .ok_or_else(|| PebbleError::Network("Not connected".to_string()))?;
@@ -584,7 +602,42 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb182
      }
  
      /// Delete a message by UID: flag as \Deleted and EXPUNGE.
-@@ -2088,22 +2281,9 @@ impl ImapProvider {
+@@ -1892,25 +2085,16 @@ impl ImapProvider {
+             .as_mut()
+             .ok_or_else(|| PebbleError::Network("Not connected".to_string()))?;
+ 
+-        macro_rules! do_search {
+-            ($s:expr) => {{
+-                with_imap_timeout("SELECT", IMAP_COMMAND_TIMEOUT_SECS, $s.select(mailbox)).await?;
+-
+-                let uids: Vec<u32> = with_imap_timeout(
+-                    "UID SEARCH ALL",
+-                    IMAP_COMMAND_TIMEOUT_SECS,
+-                    $s.uid_search("ALL"),
+-                )
+-                .await?
+-                .into_iter()
+-                .collect();
+-                uids
+-            }};
++        let result = with_imap_timeout("UID inventory", IMAP_COMMAND_TIMEOUT_SECS, async {
++            sess.select(mailbox).await?;
++            checked_uid_search(sess, "ALL").await
++        })
++        .await;
++        if result.is_err() {
++            // Incomplete responses must never be used to infer server deletions.
++            guard.take();
+         }
+-
+-        let results = do_search!(sess);
+-
+-        Ok(results)
++        result
+     }
+ 
+     /// SELECT a mailbox and return the EXISTS count without fetching UIDs.
+@@ -2088,22 +2272,9 @@ impl ImapProvider {
          }
  
          let mut idle_handle = session.idle();
@@ -610,7 +663,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb182
  
          let (wait_fut, _stop_source) = idle_handle.wait_with_timeout(timeout_dur);
          let idle_result = wait_fut.await;
-@@ -2121,14 +2301,15 @@ impl ImapProvider {
+@@ -2121,14 +2292,15 @@ impl ImapProvider {
              Err(e) => super::idle::IdleEvent::Error(format!("IDLE wait error: {e}")),
          };
  
@@ -629,7 +682,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb182
              }
          }
  
-@@ -2138,9 +2319,11 @@ impl ImapProvider {
+@@ -2138,9 +2310,11 @@ impl ImapProvider {
      /// Disconnect from the IMAP server.
      pub async fn disconnect(&self) -> Result<()> {
          let mut guard = self.session.lock().await;
@@ -644,7 +697,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb182
          }
          Ok(())
      }
-@@ -2232,6 +2415,224 @@ mod tls_config_tests {
+@@ -2232,6 +2406,224 @@ mod tls_config_tests {
          build_native_tls_connector, build_tls_connector, imap_timeout_error, ImapConfig, SmtpConfig,
      };
  
@@ -884,7 +937,7 @@ index 83304f69010447d4568a8492ec989f84a747ef66..2a11c9ea968430b49517898d64bd8b10
  pub use imap::{ConnectionSecurity, ImapConfig, ImapProvider, ProxyConfig, SmtpConfig};
  pub use outlook_sync::OutlookSyncWorker;
 diff --git a/crates/pebble-mail/src/sync.rs b/crates/pebble-mail/src/sync.rs
-index 89e991273a3a2945c4c9a22608886e4a6c0127ef..5d148e4aa873f2add1ff29dbc0cfc66133da9e04 100644
+index 89e991273a3a2945c4c9a22608886e4a6c0127ef..580f8c1abb7f9fc044d236994e318eff6859dd00 100644
 --- a/crates/pebble-mail/src/sync.rs
 +++ b/crates/pebble-mail/src/sync.rs
 @@ -533,12 +533,17 @@ fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
@@ -1292,7 +1345,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..5d148e4aa873f2add1ff29dbc0cfc661
                  }
                  Ok(()) = stop_rx.changed() => {
                      if *stop_rx.borrow() {
-@@ -2495,6 +2586,317 @@ mod tests {
+@@ -2495,6 +2586,351 @@ mod tests {
      use pebble_core::{Folder, FolderRole};
      use std::io::{self, Write};
  
@@ -1315,6 +1368,40 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..5d148e4aa873f2add1ff29dbc0cfc661
 +            statuses.push(progress.status);
 +        }
 +        (result, statuses, server.login_count())
++    }
++
++    #[tokio::test]
++    async fn rejected_or_truncated_uid_inventory_never_deletes_cached_mail() {
++        use crate::test_imap::{Behavior, Server};
++        for behavior in [
++            Behavior::SearchDenied,
++            Behavior::SearchBad,
++            Behavior::SearchDropped,
++            Behavior::EmptySearch,
++        ] {
++            let server = Server::start(behavior).await;
++            let provider = Arc::new(ImapMailProvider::new(server.config()));
++            provider.connect().await.unwrap();
++            let store = test_store_with_message("retained");
++            store.update_remote_id("retained", "7").unwrap();
++            let folder = store.list_folders("account-1").unwrap().remove(0);
++            let (_stop_tx, stop_rx) = watch::channel(false);
++            let worker = SyncWorker::new(
++                "account-1",
++                provider,
++                Arc::clone(&store),
++                stop_rx,
++                std::env::temp_dir(),
++            );
++            let result = worker.reconcile_folder_once(&folder).await;
++            if matches!(behavior, Behavior::EmptySearch) {
++                result.unwrap();
++                assert!(store.get_message("retained").unwrap().unwrap().is_deleted);
++            } else {
++                assert!(result.is_err(), "Failed inventory must stop reconciliation");
++                assert!(!store.get_message("retained").unwrap().unwrap().is_deleted);
++            }
++        }
 +    }
 +
 +    #[tokio::test]
@@ -1610,7 +1697,7 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..5d148e4aa873f2add1ff29dbc0cfc661
      struct FailingAttachmentWriter {
          fail_write: bool,
          fail_flush: bool,
-@@ -3227,6 +3629,32 @@ mod tests {
+@@ -3227,6 +3663,32 @@ mod tests {
          assert!(is_retryable_imap_connection_error(&error));
      }
  
@@ -1645,10 +1732,10 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..5d148e4aa873f2add1ff29dbc0cfc661
          let error = pebble_core::PebbleError::Network(
 diff --git a/crates/pebble-mail/src/test_imap.rs b/crates/pebble-mail/src/test_imap.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..371ef52818eb03e6ae63430cdc48ca601a31f834
+index 0000000000000000000000000000000000000000..2a4d599a3fe07e84dd51e00aaf5e782b204cefb7
 --- /dev/null
 +++ b/crates/pebble-mail/src/test_imap.rs
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,254 @@
 +// Local, credential-free IMAP fixtures for connection and deletion regressions.
 +use std::sync::atomic::{AtomicUsize, Ordering};
 +use std::sync::{Arc, Mutex};
@@ -1674,6 +1761,10 @@ index 0000000000000000000000000000000000000000..371ef52818eb03e6ae63430cdc48ca60
 +    DropFirstLogin,
 +    RejectLogin,
 +    TrashMailbox,
++    SearchDenied,
++    SearchBad,
++    SearchDropped,
++    EmptySearch,
 +    HeaderSearchDenied,
 +    HeaderFetchDenied,
 +    DuplicateHeader,
@@ -1804,7 +1895,17 @@ index 0000000000000000000000000000000000000000..371ef52818eb03e6ae63430cdc48ca60
 +                                    } else if selected == "INBOX" && !moved {
 +                                        " 7"
 +                                    } else { "" };
-+                                    if matches!(behavior, Behavior::HeaderSearchDenied | Behavior::HeaderFetchDenied | Behavior::DuplicateHeader)
++                                    if matches!(behavior, Behavior::SearchDropped) {
++                                        stream.get_mut().write_all(b"* SEARCH 7\r\n").await.unwrap();
++                                        break;
++                                    }
++                                    if matches!(behavior, Behavior::SearchDenied) {
++                                        format!("* SEARCH\r\n{tag} NO [UNAVAILABLE] backend error\r\n")
++                                    } else if matches!(behavior, Behavior::SearchBad) {
++                                        format!("* SEARCH 7\r\n{tag} BAD unsupported search\r\n")
++                                    } else if matches!(behavior, Behavior::EmptySearch) {
++                                        format!("* SEARCH\r\n{tag} OK empty mailbox\r\n")
++                                    } else if matches!(behavior, Behavior::HeaderSearchDenied | Behavior::HeaderFetchDenied | Behavior::DuplicateHeader)
 +                                        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("HEADER")) {
 +                                        format!("* SEARCH 999\r\n{tag} NO [UNAVAILABLE] search backend error\r\n")
 +                                    } else if matches!(behavior, Behavior::DuplicateHeader) {
