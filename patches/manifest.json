@@ -2,14 +2,16 @@
   "base_commit": "ee291693bda113767b59bbd291288084801e4a50",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "521c479f8173aa15d4974a78f8da65d0355444e1641cd636efc85f8606fd4f81",
+  "sha256": "b7c0e3327e4406b1c97eb2e9701a30ef404f894bcea2dc3852b9656ec1464ed6",
   "files": [
     "crates/pebble-mail/src/imap.rs",
     "crates/pebble-mail/src/lib.rs",
     "crates/pebble-mail/src/sync.rs",
     "crates/pebble-mail/src/test_imap.rs",
+    "crates/pebble-store/src/pending_ops.rs",
     "src-tauri/src/commands/batch.rs",
     "src-tauri/src/commands/messages/lifecycle.rs",
+    "src-tauri/src/commands/messages/mod.rs",
     "src-tauri/src/commands/oauth.rs",
     "src-tauri/src/commands/pending_mail_ops.rs",
     "src-tauri/src/commands/sync_cmd.rs",
@@ -69,6 +71,18 @@
         "tests/features/mail-archive/MailArchiveView.test.tsx"
       ],
       "description": "Do not reset archive selection/detail when unchanged initial search debounce fires. Fake-clock regression fails against original source and passes after fix; real query changes still clear stale detail."
+    },
+    {
+      "date": "2026-11-23",
+      "based_on_commit": "3fbc8860ea9938a949f75afe2c4237a07595057f",
+      "files": [
+        "crates/pebble-mail/src/imap.rs",
+        "crates/pebble-mail/src/test_imap.rs",
+        "crates/pebble-store/src/pending_ops.rs",
+        "src-tauri/src/commands/batch.rs",
+        "src-tauri/src/commands/messages/mod.rs"
+      ],
+      "description": "Verify tagged SEARCH and FETCH completion, resolve exact Message-ID headers in batches when the server rejects header search, and coalesce repeated failed trash requests. Cover move recovery, ambiguous identity and partial command failure on loopback."
     }
   ],
   "original_base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97"

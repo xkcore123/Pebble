@@ -1,5 +1,5 @@
 diff --git a/crates/pebble-mail/src/imap.rs b/crates/pebble-mail/src/imap.rs
-index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa7d5b8707 100644
+index 8821706280df8b7abbfb47b25c1955ca6965b65f..ae7dd847d2991c46413888462b2fb1823e372156 100644
 --- a/crates/pebble-mail/src/imap.rs
 +++ b/crates/pebble-mail/src/imap.rs
 @@ -337,11 +337,22 @@ type ImapSession = async_imap::Session<PrefixedStream<InnerStream>>;
@@ -25,7 +25,152 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
  async fn with_imap_timeout<T, E, Fut>(operation: &str, seconds: u64, future: Fut) -> Result<T>
  where
      E: Display,
-@@ -741,7 +752,7 @@ impl ImapProvider {
+@@ -391,6 +402,144 @@ fn imap_since_search_criteria(cutoff: i64, since_uid: Option<u32>) -> Option<Str
+     Some(criteria)
+ }
+ 
++/// Stream identity lookup results through the matching tagged completion. The
++/// high-level search/fetch streams in async-imap 0.10 hide tagged failures.
++async fn identity_command(
++    sess: &mut ImapSession,
++    command: &str,
++    mut receive: impl FnMut(&async_imap::imap_proto::Response<'_>),
++) -> async_imap::error::Result<()> {
++    use async_imap::error::Error;
++    use async_imap::imap_proto::{Response, Status};
++    let tag = sess.run_command(command).await?;
++    loop {
++        let response = sess.read_response().await.ok_or(Error::ConnectionLost)??;
++        match response.parsed() {
++            Response::Done {
++                tag: done,
++                status,
++                information,
++                ..
++            } if *done == tag => {
++                let details = || information.as_deref().unwrap_or("No details").to_owned();
++                return match status {
++                    Status::Ok => Ok(()),
++                    Status::Bad => Err(Error::Bad(details())),
++                    _ => Err(Error::No(details())),
++                };
++            }
++            Response::Data {
++                status: Status::Bye,
++                ..
++            } => return Err(Error::ConnectionLost),
++            data => receive(data),
++        }
++    }
++}
++
++async fn identity_candidates(
++    sess: &mut ImapSession,
++    criteria: &str,
++) -> async_imap::error::Result<Vec<u32>> {
++    use async_imap::imap_proto::{MailboxDatum, Response};
++    let mut hits = None;
++    identity_command(sess, &format!("UID SEARCH {criteria}"), |data| {
++        if let Response::MailboxData(MailboxDatum::Search(ids)) = data {
++            hits.get_or_insert_with(Vec::new).extend_from_slice(ids);
++        }
++    })
++    .await?;
++    hits.ok_or_else(|| {
++        async_imap::error::Error::Parse(async_imap::error::ParseError::ExpectedResponseNotFound(
++            "SEARCH".into(),
++        ))
++    })
++}
++
++async fn lookup_message_id(
++    sess: &mut ImapSession,
++    mailbox: &str,
++    header: &str,
++) -> Result<Option<u32>> {
++    use async_imap::error::Error;
++    use async_imap::imap_proto::{AttributeValue, MessageSection, Response, SectionPath};
++    if header.contains(['\r', '\n', '\0']) {
++        return Err(PebbleError::Validation("Invalid Message-ID".into()));
++    }
++    with_imap_timeout("SELECT", IMAP_COMMAND_TIMEOUT_SECS, sess.select(mailbox)).await?;
++    let criteria = format!(
++        "HEADER \"Message-ID\" \"{}\"",
++        header.replace('\\', "\\\\").replace('"', "\\\"")
++    );
++    let mut candidates = match identity_candidates(sess, &criteria).await {
++        Ok(ids) => ids,
++        Err(Error::No(_) | Error::Bad(_)) => identity_candidates(sess, "ALL")
++            .await
++            .map_err(|e| PebbleError::Network(format!("UID SEARCH ALL failed: {e}")))?,
++        Err(e) => return Err(PebbleError::Network(format!("UID SEARCH failed: {e}"))),
++    };
++    candidates.sort_unstable();
++    candidates.dedup();
++    let expected = header.trim();
++    let expected = expected
++        .strip_prefix('<')
++        .and_then(|s| s.strip_suffix('>'))
++        .unwrap_or(expected);
++    let mut found = None;
++    for batch in candidates.chunks(64) {
++        let ids = batch
++            .iter()
++            .map(u32::to_string)
++            .collect::<Vec<_>>()
++            .join(",");
++        let mut seen = HashSet::new();
++        let mut ambiguous = false;
++        identity_command(
++            sess,
++            &format!("UID FETCH {ids} (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"),
++            |response| {
++                if let Response::Fetch(_, attrs) = response {
++                    let uid = attrs.iter().find_map(|a| match a {
++                        AttributeValue::Uid(id) => Some(*id),
++                        _ => None,
++                    });
++                    let raw = attrs.iter().find_map(|a| match a {
++                        AttributeValue::BodySection {
++                            section: Some(SectionPath::Full(MessageSection::Header)),
++                            index: None,
++                            data: Some(raw),
++                        } => Some(raw.as_ref()),
++                        _ => None,
++                    });
++                    if let (Some(uid), Some(raw)) = (uid, raw) {
++                        if batch.binary_search(&uid).is_ok() && seen.insert(uid) {
++                            let parsed = mail_parser::MessageParser::default().parse(raw);
++                            if parsed.as_ref().and_then(|m| m.message_id()) == Some(expected)
++                                && found.replace(uid).is_some()
++                            {
++                                ambiguous = true;
++                            }
++                        }
++                    }
++                }
++            },
++        )
++        .await
++        .map_err(|e| PebbleError::Network(format!("UID FETCH Message-ID failed: {e}")))?;
++        if ambiguous {
++            return Err(PebbleError::Sync(
++                "Message-ID matches multiple IMAP messages".into(),
++            ));
++        }
++        if seen.len() != batch.len() {
++            return Err(PebbleError::Sync(
++                "Incomplete IMAP Message-ID header lookup".into(),
++            ));
++        }
++    }
++    Ok(found)
++}
++
+ /// An IMAP provider that manages a connection and session.
+ pub struct ImapProvider {
+     config: ImapConfig,
+@@ -741,7 +890,7 @@ impl ImapProvider {
          )
          .await
          .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
@@ -34,7 +179,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
      }
  
      /// Establish a TCP connection, optionally through a SOCKS5 proxy.
-@@ -839,7 +850,7 @@ impl ImapProvider {
+@@ -839,7 +988,7 @@ impl ImapProvider {
                  )
                  .await
                  .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
@@ -43,7 +188,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
              }
              ConnectionSecurity::StartTls => {
                  // Connect plain, read greeting, optionally send ID, STARTTLS, upgrade TLS.
-@@ -879,7 +890,7 @@ impl ImapProvider {
+@@ -879,7 +1028,7 @@ impl ImapProvider {
                  )
                  .await
                  .map_err(|_| imap_timeout_error("IMAP login", IMAP_COMMAND_TIMEOUT_SECS))?
@@ -52,7 +197,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
              }
          };
  
-@@ -1212,33 +1223,89 @@ impl ImapProvider {
+@@ -1212,33 +1361,89 @@ impl ImapProvider {
  
      /// List folders for the given account, returning `Folder` structs.
      pub async fn list_folders(&self, account_id: &str) -> Result<Vec<Folder>> {
@@ -163,7 +308,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
          };
  
          let mut folders: Vec<Folder> = mailboxes
-@@ -1280,6 +1347,34 @@ impl ImapProvider {
+@@ -1280,6 +1485,34 @@ impl ImapProvider {
          Ok(folders)
      }
  
@@ -198,7 +343,248 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
      /// Fetch raw message bytes from a mailbox.
      /// Returns a list of `(uid, raw_bytes)` pairs.
      pub async fn fetch_messages_raw(
-@@ -2088,22 +2183,9 @@ impl ImapProvider {
+@@ -1686,124 +1919,94 @@ impl ImapProvider {
+             .as_mut()
+             .ok_or_else(|| PebbleError::Network("Not connected".to_string()))?;
+ 
+-        macro_rules! do_move {
+-            ($s:expr) => {{
+-                with_imap_timeout(
+-                    "SELECT",
+-                    IMAP_COMMAND_TIMEOUT_SECS,
+-                    $s.select(source_mailbox),
+-                )
+-                .await?;
+-
+-                // Try MOVE extension first
+-                match with_imap_timeout(
+-                    "UID MOVE",
+-                    IMAP_COMMAND_TIMEOUT_SECS,
+-                    $s.uid_mv(&uid_str, dest_mailbox),
+-                )
+-                .await
+-                {
+-                    Ok(_) => {
+-                        debug!(
+-                            "MOVE UID {} from {} to {} succeeded",
+-                            uid, source_mailbox, dest_mailbox
+-                        );
+-                    }
+-                    Err(_move_err) => {
+-                        // Fallback: COPY + flag Deleted + EXPUNGE
+-                        debug!(
+-                            "MOVE not supported, falling back to COPY+DELETE for UID {}",
+-                            uid
+-                        );
+-
+-                        // Idempotency: on retry after a partial COPY/EXPUNGE
+-                        // failure the destination may already hold a copy (COPY
+-                        // preserves the Message-ID header). Search the dest and
+-                        // skip COPY if a match is found, so a retried move does
+-                        // not create duplicates. Any error here is treated as
+-                        // "no match" (fall through to COPY) — never block the move.
+-                        let mut already_copied = false;
+-                        if let Some(h) = message_id_header {
+-                            if !h.is_empty() {
+-                                let criteria = format!(
+-                                    "HEADER \"Message-ID\" \"{}\"",
+-                                    h.replace('\\', "\\\\").replace('"', "\\\"")
+-                                );
+-                                let dest_selected = with_imap_timeout(
+-                                    "SELECT",
+-                                    IMAP_COMMAND_TIMEOUT_SECS,
+-                                    $s.select(dest_mailbox),
+-                                )
+-                                .await
+-                                .is_ok();
+-                                if dest_selected {
+-                                    already_copied = match with_imap_timeout(
+-                                        "UID SEARCH",
+-                                        IMAP_COMMAND_TIMEOUT_SECS,
+-                                        $s.uid_search(criteria.as_str()),
+-                                    )
+-                                    .await
+-                                    {
+-                                        Ok(hits) => hits.into_iter().next().is_some(),
+-                                        Err(_) => false,
+-                                    };
+-                                }
+-                            }
+-                        }
+-
+-                        // Re-select source (restores selection after the dest
+-                        // search above and in case the MOVE attempt changed state).
+-                        with_imap_timeout(
+-                            "SELECT",
+-                            IMAP_COMMAND_TIMEOUT_SECS,
+-                            $s.select(source_mailbox),
+-                        )
+-                        .await?;
++        let result = async {
++            with_imap_timeout(
++                "SELECT",
++                IMAP_COMMAND_TIMEOUT_SECS,
++                sess.select(source_mailbox),
++            )
++            .await?;
+ 
+-                        if !already_copied {
++            // Try MOVE extension first
++            match tokio::time::timeout(
++                Duration::from_secs(IMAP_COMMAND_TIMEOUT_SECS),
++                sess.uid_mv(&uid_str, dest_mailbox),
++            )
++            .await
++            {
++                Ok(Ok(())) => {}
++                Err(_) => return Err(imap_timeout_error("UID MOVE", IMAP_COMMAND_TIMEOUT_SECS)),
++                Ok(Err(async_imap::error::Error::Bad(_) | async_imap::error::Error::No(_))) => {
++                    let already_copied =
++                        if let Some(header) = message_id_header.filter(|h| !h.trim().is_empty()) {
+                             with_imap_timeout(
+-                                "UID COPY",
++                                "Destination Message-ID lookup",
+                                 IMAP_COMMAND_TIMEOUT_SECS,
+-                                $s.uid_copy(&uid_str, dest_mailbox),
++                                lookup_message_id(sess, dest_mailbox, header),
+                             )
+-                            .await?;
+-                        }
++                            .await?
++                            .is_some()
++                        } else {
++                            false
++                        };
+ 
+-                        let store_result = with_imap_timeout(
+-                            "STORE \\Deleted",
+-                            IMAP_COMMAND_TIMEOUT_SECS,
+-                            $s.uid_store(&uid_str, "+FLAGS (\\Deleted)"),
+-                        )
+-                        .await?;
+-                        let _: Vec<async_imap::types::Fetch> = with_imap_timeout(
+-                            "STORE \\Deleted collect",
+-                            IMAP_COMMAND_TIMEOUT_SECS,
+-                            store_result.try_collect(),
+-                        )
+-                        .await?;
++                    // Re-select source (restores selection after the dest
++                    // search above and in case the MOVE attempt changed state).
++                    with_imap_timeout(
++                        "SELECT",
++                        IMAP_COMMAND_TIMEOUT_SECS,
++                        sess.select(source_mailbox),
++                    )
++                    .await?;
+ 
+-                        let expunge_result =
+-                            with_imap_timeout("EXPUNGE", IMAP_COMMAND_TIMEOUT_SECS, $s.expunge())
+-                                .await?;
+-                        let _: Vec<u32> = with_imap_timeout(
+-                            "EXPUNGE collect",
++                    if !already_copied {
++                        with_imap_timeout(
++                            "UID COPY",
+                             IMAP_COMMAND_TIMEOUT_SECS,
+-                            expunge_result.try_collect(),
++                            sess.uid_copy(&uid_str, dest_mailbox),
+                         )
+                         .await?;
+-
+-                        debug!(
+-                            "COPY+DELETE UID {} from {} to {} succeeded",
+-                            uid, source_mailbox, dest_mailbox
+-                        );
+                     }
+-                }
+-            }};
+-        }
+ 
+-        do_move!(sess);
++                    let store_result = with_imap_timeout(
++                        "STORE \\Deleted",
++                        IMAP_COMMAND_TIMEOUT_SECS,
++                        sess.uid_store(&uid_str, "+FLAGS (\\Deleted)"),
++                    )
++                    .await?;
++                    let _: Vec<async_imap::types::Fetch> = with_imap_timeout(
++                        "STORE \\Deleted collect",
++                        IMAP_COMMAND_TIMEOUT_SECS,
++                        store_result.try_collect(),
++                    )
++                    .await?;
+ 
+-        Ok(())
++                    let expunge_result =
++                        with_imap_timeout("EXPUNGE", IMAP_COMMAND_TIMEOUT_SECS, sess.expunge())
++                            .await?;
++                    let _: Vec<u32> = with_imap_timeout(
++                        "EXPUNGE collect",
++                        IMAP_COMMAND_TIMEOUT_SECS,
++                        expunge_result.try_collect(),
++                    )
++                    .await?;
++
++                    debug!(
++                        "COPY+DELETE UID {} from {} to {} succeeded",
++                        uid, source_mailbox, dest_mailbox
++                    );
++                }
++                Ok(Err(error)) => {
++                    return Err(PebbleError::Network(format!("UID MOVE failed: {error}")))
++                }
++            }
++            Ok(())
++        }
++        .await;
++        if result.is_err() {
++            guard.take();
++        }
++        result
+     }
+ 
+     /// Resolve a Message-ID to its mailbox-local UID, including after MOVE.
+@@ -1815,30 +2018,20 @@ impl ImapProvider {
+         if message_id_header.trim().is_empty() {
+             return Ok(None);
+         }
+-        if message_id_header.contains(['\r', '\n']) {
+-            return Err(PebbleError::Validation("Invalid Message-ID".into()));
+-        }
+-        let criteria = format!(
+-            "HEADER \"Message-ID\" \"{}\"",
+-            message_id_header.replace('\\', "\\\\").replace('"', "\\\"")
+-        );
+         let mut guard = self.session.lock().await;
+-        let sess = guard
++        let session = guard
+             .as_mut()
+-            .ok_or_else(|| PebbleError::Network("Not connected".to_string()))?;
+-        with_imap_timeout("SELECT", IMAP_COMMAND_TIMEOUT_SECS, sess.select(mailbox)).await?;
+-        let hits = with_imap_timeout(
+-            "UID SEARCH",
++            .ok_or_else(|| PebbleError::Network("Not connected".into()))?;
++        let result = with_imap_timeout(
++            "Message-ID lookup",
+             IMAP_COMMAND_TIMEOUT_SECS,
+-            sess.uid_search(criteria.as_str()),
++            lookup_message_id(session, mailbox, message_id_header),
+         )
+-        .await?;
+-        if hits.len() > 1 {
+-            return Err(PebbleError::Sync(
+-                "Message-ID matches multiple IMAP messages".into(),
+-            ));
++        .await;
++        if result.is_err() {
++            guard.take();
+         }
+-        Ok(hits.into_iter().next())
++        result
+     }
+ 
+     /// Delete a message by UID: flag as \Deleted and EXPUNGE.
+@@ -2088,22 +2281,9 @@ impl ImapProvider {
          }
  
          let mut idle_handle = session.idle();
@@ -224,7 +610,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
  
          let (wait_fut, _stop_source) = idle_handle.wait_with_timeout(timeout_dur);
          let idle_result = wait_fut.await;
-@@ -2121,14 +2203,15 @@ impl ImapProvider {
+@@ -2121,14 +2301,15 @@ impl ImapProvider {
              Err(e) => super::idle::IdleEvent::Error(format!("IDLE wait error: {e}")),
          };
  
@@ -243,7 +629,7 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
              }
          }
  
-@@ -2138,9 +2221,11 @@ impl ImapProvider {
+@@ -2138,9 +2319,11 @@ impl ImapProvider {
      /// Disconnect from the IMAP server.
      pub async fn disconnect(&self) -> Result<()> {
          let mut guard = self.session.lock().await;
@@ -258,10 +644,34 @@ index 8821706280df8b7abbfb47b25c1955ca6965b65f..262c5c7cab77ea7b84a67c1acf323ffa
          }
          Ok(())
      }
-@@ -2232,6 +2317,200 @@ mod tls_config_tests {
+@@ -2232,6 +2415,224 @@ mod tls_config_tests {
          build_native_tls_connector, build_tls_connector, imap_timeout_error, ImapConfig, SmtpConfig,
      };
  
++    #[tokio::test]
++    async fn identity_lookup_checks_exact_headers_and_command_completion() {
++        use crate::test_imap::{Behavior, Server};
++        for (behavior, expected) in [
++            (Behavior::HeaderSearchDenied, None),
++            (Behavior::HeaderFetchDenied, Some("UID FETCH")),
++            (Behavior::DuplicateHeader, Some("multiple IMAP messages")),
++        ] {
++            let server = Server::start(behavior).await;
++            let provider = super::ImapProvider::new(server.config());
++            provider.connect().await.unwrap();
++            let header = if expected.is_none() {
++                "<another@example.invalid>"
++            } else {
++                "<fixture@example.invalid>"
++            };
++            let result = provider.find_uid_by_message_id("INBOX", header).await;
++            match expected {
++                Some(text) => assert!(result.unwrap_err().to_string().contains(text)),
++                None => assert_eq!(result.unwrap(), None),
++            }
++        }
++    }
++
 +    fn trash_test_store() -> pebble_store::Store {
 +        let store = pebble_store::Store::open_in_memory().unwrap();
 +        store
@@ -1235,10 +1645,10 @@ index 89e991273a3a2945c4c9a22608886e4a6c0127ef..5d148e4aa873f2add1ff29dbc0cfc661
          let error = pebble_core::PebbleError::Network(
 diff --git a/crates/pebble-mail/src/test_imap.rs b/crates/pebble-mail/src/test_imap.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..31d1c67d5883166529358ee9f91771a2721dce30
+index 0000000000000000000000000000000000000000..371ef52818eb03e6ae63430cdc48ca601a31f834
 --- /dev/null
 +++ b/crates/pebble-mail/src/test_imap.rs
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,240 @@
 +// Local, credential-free IMAP fixtures for connection and deletion regressions.
 +use std::sync::atomic::{AtomicUsize, Ordering};
 +use std::sync::{Arc, Mutex};
@@ -1264,6 +1674,9 @@ index 0000000000000000000000000000000000000000..31d1c67d5883166529358ee9f91771a2
 +    DropFirstLogin,
 +    RejectLogin,
 +    TrashMailbox,
++    HeaderSearchDenied,
++    HeaderFetchDenied,
++    DuplicateHeader,
 +    NoTrash,
 +    ListDenied,
 +    PartialListDenied,
@@ -1356,7 +1769,7 @@ index 0000000000000000000000000000000000000000..31d1c67d5883166529358ee9f91771a2
 +                                }
 +                                Behavior::PartialListDenied => format!("* LIST (\\Trash) \"/\" \"Trash\"\r\n{tag} NO LIST denied\r\n"),
 +                                Behavior::ListDenied => format!("{tag} NO LIST denied\r\n"),
-+                                Behavior::TrashMailbox => format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"&XfJSIJZk-\"\r\n{tag} OK LIST completed\r\n"),
++                                Behavior::TrashMailbox | Behavior::HeaderSearchDenied | Behavior::HeaderFetchDenied | Behavior::DuplicateHeader => format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"&XfJSIJZk-\"\r\n{tag} OK LIST completed\r\n"),
 +                                Behavior::NestedMailbox => format!("* LIST () \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"Projects/Work\"\r\n* LIST (\\All) \"/\" \"All Mail\"\r\n{tag} OK LIST completed\r\n"),
 +                                _ => format!("* LIST () \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n"),
 +                            }
@@ -1391,9 +1804,27 @@ index 0000000000000000000000000000000000000000..31d1c67d5883166529358ee9f91771a2
 +                                    } else if selected == "INBOX" && !moved {
 +                                        " 7"
 +                                    } else { "" };
-+                                    format!("* SEARCH{uid}\r\n{tag} OK SEARCH completed\r\n")
++                                    if matches!(behavior, Behavior::HeaderSearchDenied | Behavior::HeaderFetchDenied | Behavior::DuplicateHeader)
++                                        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("HEADER")) {
++                                        format!("* SEARCH 999\r\n{tag} NO [UNAVAILABLE] search backend error\r\n")
++                                    } else if matches!(behavior, Behavior::DuplicateHeader) {
++                                        format!("* SEARCH 7 8\r\n{tag} OK search completed\r\n")
++                                    } else {
++                                        format!("* SEARCH{uid}\r\n{tag} OK SEARCH completed\r\n")
++                                    }
++                                }
++                                "FETCH" => {
++                                    let ids = words.next().unwrap_or("");
++                                    let header = "Message-ID: <fixture@example.invalid>\r\n\r\n";
++                                    let mut data = String::new();
++                                    for (index, uid) in ids.split(',').enumerate() {
++                                        data.push_str(&format!("* {} FETCH (UID {uid} BODY[HEADER.FIELDS (MESSAGE-ID)] {{{}}}\r\n{header})\r\n", index+1, header.len()));
++                                    }
++                                    let status = if matches!(behavior, Behavior::HeaderFetchDenied) { "NO" } else { "OK" };
++                                    format!("{data}{tag} {status} header fetch\r\n")
 +                                }
 +                                "MOVE" => {
++                                    recorded.lock().unwrap().push("UID MOVE".into());
 +                                    moved = true;
 +                                    format!("{tag} OK MOVE completed\r\n")
 +                                }
@@ -1458,11 +1889,111 @@ index 0000000000000000000000000000000000000000..31d1c67d5883166529358ee9f91771a2
 +            .count()
 +    }
 +}
+diff --git a/crates/pebble-store/src/pending_ops.rs b/crates/pebble-store/src/pending_ops.rs
+index 8440d4b91232a8f0884364ba998fb3d2678e2be2..120c4ab2aefc98269475b66dd5eb0604024098cd 100644
+--- a/crates/pebble-store/src/pending_ops.rs
++++ b/crates/pebble-store/src/pending_ops.rs
+@@ -99,6 +99,42 @@ impl Store {
+         })
+     }
+ 
++    /// Record the first failure atomically. Repeated clicks on the same active
++    /// trash request must not create another job or exhaust its retry budget.
++    pub fn record_failed_delete(
++        &self,
++        account_id: &str,
++        message_id: &str,
++        payload: &str,
++        error: &str,
++    ) -> Result<()> {
++        self.with_write(|conn| {
++            let now = pebble_core::now_timestamp();
++            conn.execute(
++                "INSERT INTO pending_mail_ops
++                 (id, account_id, message_id, op_type, payload_json, status, attempts,
++                  last_error, created_at, updated_at, next_retry_at)
++                 SELECT ?1, ?2, ?3, 'delete', ?4, 'failed', 1, ?5, ?6, ?6, ?7
++                 WHERE NOT EXISTS (
++                     SELECT 1 FROM (
++                         SELECT op_type, payload_json, status FROM pending_mail_ops
++                         WHERE account_id = ?2 AND message_id = ?3 ORDER BY rowid DESC LIMIT 1
++                     ) WHERE op_type = 'delete' AND payload_json = ?4 AND status != 'done'
++                 )",
++                params![
++                    pebble_core::new_id(),
++                    account_id,
++                    message_id,
++                    payload,
++                    error,
++                    now,
++                    now + pending_mail_retry_delay_secs(1)
++                ],
++            )?;
++            Ok(())
++        })
++    }
++
+     pub fn list_pending_mail_ops(&self, account_id: &str) -> Result<Vec<PendingMailOp>> {
+         self.with_read(|conn| {
+             let mut stmt = conn.prepare(
+@@ -762,6 +798,30 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn deletion_dedup_preserves_distinct_intents_and_completed_history() {
++        let store = Store::open_in_memory().unwrap();
++        let record = |payload| {
++            store
++                .record_failed_delete("account", "message", payload, "failed")
++                .unwrap()
++        };
++        record("inbox-to-trash");
++        record("inbox-to-trash");
++        let first = store.list_pending_mail_ops("account").unwrap();
++        assert_eq!(first.len(), 1);
++        store.mark_pending_mail_op_done(&first[0].id).unwrap();
++        record("inbox-to-trash");
++        record("archive-to-trash");
++        assert_eq!(
++            store
++                .list_active_pending_mail_ops(Some("account"), 10)
++                .unwrap()
++                .len(),
++            2
++        );
++    }
++
+     #[test]
+     fn pending_mail_ops_insert_list_mark_failed_and_done() {
+         let store = Store::open_in_memory().unwrap();
 diff --git a/src-tauri/src/commands/batch.rs b/src-tauri/src/commands/batch.rs
-index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..b964839378688e962b2b5e1130800dee5416b8ae 100644
+index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..c33e8ac54d0dd11c6ec5922c719404a4073ae6f4 100644
 --- a/src-tauri/src/commands/batch.rs
 +++ b/src-tauri/src/commands/batch.rs
-@@ -327,6 +327,66 @@ pub async fn batch_archive(
+@@ -40,20 +40,7 @@ fn queue_batch_pending_op(
+     payload: serde_json::Value,
+     error: &str,
+ ) -> std::result::Result<(), PebbleError> {
+-    let payload = json!({
+-        "provider_account_id": message.account_id,
+-        "remote_id": message.remote_id,
+-        "op": op_type,
+-        "payload": payload,
+-    });
+-    let op_id = state.store.insert_pending_mail_op(
+-        &message.account_id,
+-        &message.id,
+-        op_type,
+-        &payload.to_string(),
+-    )?;
+-    state.store.mark_pending_mail_op_failed(&op_id, error)?;
+-    Ok(())
++    super::messages::queue_pending_remote_op(state, message, op_type, payload, error).map(|_| ())
+ }
+ 
+ fn batch_local_commit_ids(
+@@ -327,6 +314,66 @@ pub async fn batch_archive(
      Ok(success_count)
  }
  
@@ -1529,7 +2060,7 @@ index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..b964839378688e962b2b5e1130800dee
  #[tauri::command]
  pub async fn batch_delete(
      state: State<'_, AppState>,
-@@ -351,6 +411,8 @@ pub async fn batch_delete(
+@@ -351,6 +398,8 @@ pub async fn batch_delete(
      // Track which messages were successfully deleted remotely
      let mut deleted_ids: Vec<String> = Vec::new();
      let mut queued_for_local_commit_ids: Vec<String> = Vec::new();
@@ -1538,7 +2069,7 @@ index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..b964839378688e962b2b5e1130800dee
      // Remote sync: connect once per account, operate, disconnect.
      for (account_id, (provider_type, messages)) in &groups {
          if matches!(provider_type, ProviderType::Pop3) {
-@@ -407,79 +469,38 @@ pub async fn batch_delete(
+@@ -407,79 +456,38 @@ pub async fn batch_delete(
                          }
                      }
                      ConnectedProvider::Imap(imap) => {
@@ -1647,7 +2178,7 @@ index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..b964839378688e962b2b5e1130800dee
                                  }
                              }
                          }
-@@ -490,14 +511,35 @@ pub async fn batch_delete(
+@@ -490,14 +498,35 @@ pub async fn batch_delete(
              Err(e) => {
                  let error = e.to_string();
                  for msg in messages {
@@ -1686,7 +2217,7 @@ index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..b964839378688e962b2b5e1130800dee
                  }
              }
          }
-@@ -511,7 +553,8 @@ pub async fn batch_delete(
+@@ -511,7 +540,8 @@ pub async fn batch_delete(
  
      // Local bulk soft-delete
      state.store.bulk_soft_delete(&ids_to_delete)?;
@@ -1696,7 +2227,7 @@ index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..b964839378688e962b2b5e1130800dee
  
      // Update search index: remove deleted messages.
      let delete_ids: Vec<String> = ids_to_delete.clone();
-@@ -531,6 +574,11 @@ pub async fn batch_delete(
+@@ -531,6 +561,11 @@ pub async fn batch_delete(
          success_count,
          message_ids.len()
      );
@@ -1708,7 +2239,7 @@ index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..b964839378688e962b2b5e1130800dee
      Ok(success_count)
  }
  
-@@ -834,6 +882,132 @@ mod tests {
+@@ -834,6 +869,190 @@ mod tests {
      use super::{batch_local_commit_ids, record_remote_success_after_remote_id_update};
      use pebble_core::PebbleError;
  
@@ -1804,6 +2335,64 @@ index e3278b50ddaf5ab356eb69234ed5d0d04571f38f..b964839378688e962b2b5e1130800dee
 +        assert_eq!(server.command_count("LIST"), 1);
 +        assert_eq!(server.command_count("EXPUNGE"), 0);
 +        imap.disconnect().await.unwrap();
++    }
++
++    #[tokio::test]
++    async fn rejected_header_search_moves_once_and_recovers_destination_uid_on_retry() {
++        let server = fixture::Server::start(fixture::Behavior::HeaderSearchDenied).await;
++        let imap = pebble_mail::ImapProvider::new(server.config());
++        imap.connect().await.unwrap();
++        let (state, message) = deletion_state();
++        super::delete_imap_message(&state, &imap, &message)
++            .await
++            .unwrap();
++        let trash = state
++            .store
++            .find_folder_by_role("account", pebble_core::FolderRole::Trash)
++            .unwrap()
++            .unwrap();
++        super::imap_move_tracked(&state, &imap, &message, "INBOX", 7, &trash.remote_id)
++            .await
++            .unwrap();
++        assert_eq!(
++            state.store.get_message_folder_ids(&message.id).unwrap(),
++            vec![trash.id]
++        );
++        let moved = state.store.get_message(&message.id).unwrap().unwrap();
++        assert_eq!(moved.remote_id, "42");
++        assert!(!moved.is_deleted);
++        assert_eq!(server.command_count("UID MOVE"), 1);
++        assert!(state
++            .store
++            .list_pending_mail_ops("account")
++            .unwrap()
++            .is_empty());
++    }
++
++    #[tokio::test]
++    async fn rejected_or_ambiguous_header_fetch_leaves_source_and_queues_once() {
++        for behavior in [
++            fixture::Behavior::HeaderFetchDenied,
++            fixture::Behavior::DuplicateHeader,
++        ] {
++            let server = fixture::Server::start(behavior).await;
++            let (state, message) = deletion_state();
++            for _ in 0..2 {
++                let imap = pebble_mail::ImapProvider::new(server.config());
++                imap.connect().await.unwrap();
++                assert!(super::delete_imap_message(&state, &imap, &message)
++                    .await
++                    .is_err());
++            }
++            assert_eq!(server.command_count("UID MOVE"), 0);
++            assert_eq!(
++                state.store.get_message_folder_ids(&message.id).unwrap(),
++                vec!["inbox"]
++            );
++            let ops = state.store.list_pending_mail_ops("account").unwrap();
++            assert_eq!(ops.len(), 1);
++            assert_eq!(ops[0].attempts, 1);
++        }
 +    }
 +
 +    #[tokio::test]
@@ -1919,6 +2508,26 @@ index 72eda44539239b5fa7de796bde3dc6cf7f82eaf7..5f4a9a623a6941678b735d035e63d77a
                          let outcome = queue_remote_op(
                              &state,
                              &msg,
+diff --git a/src-tauri/src/commands/messages/mod.rs b/src-tauri/src/commands/messages/mod.rs
+index 206042546adc8dbc73bf20f2b1d0bde6e4f0a335..bd97bb29d90c3b63df8b741089f3912fc669a62a 100644
+--- a/src-tauri/src/commands/messages/mod.rs
++++ b/src-tauri/src/commands/messages/mod.rs
+@@ -145,6 +145,15 @@ pub(super) fn queue_pending_remote_op(
+         "op": op_type,
+         "payload": payload,
+     });
++    if op_type == "delete" {
++        state.store.record_failed_delete(
++            &message.account_id,
++            &message.id,
++            &payload.to_string(),
++            error,
++        )?;
++        return Ok(RemoteMutationOutcome::Queued);
++    }
+     let op_id = state.store.insert_pending_mail_op(
+         &message.account_id,
+         &message.id,
 diff --git a/src-tauri/src/commands/oauth.rs b/src-tauri/src/commands/oauth.rs
 index 80f4b6266a92e726e1ecc4820ccbf25d619a06b0..28dfb8726290066d17ebfa1e8b347cf1ea2c583d 100644
 --- a/src-tauri/src/commands/oauth.rs
