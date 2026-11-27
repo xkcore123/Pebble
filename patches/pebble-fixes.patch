@@ -49,7 +49,7 @@ index 7befb9315108f5262edacc626034476ee505c4d5..4904fab0ac5a18a17ed21a4f6aff06c2
          };
  
 diff --git a/crates/pebble-mail/src/imap/fetch.rs b/crates/pebble-mail/src/imap/fetch.rs
-index 4587153d335f520944f24cb07c1b45ec174689e6..aba1a6b640c4d441d936ce4101500eba1c75197c 100644
+index 4587153d335f520944f24cb07c1b45ec174689e6..6c09251d2d7ee5ad790b2d856cb47cd311757d75 100644
 --- a/crates/pebble-mail/src/imap/fetch.rs
 +++ b/crates/pebble-mail/src/imap/fetch.rs
 @@ -3,33 +3,89 @@ use super::*;
@@ -221,7 +221,7 @@ index 4587153d335f520944f24cb07c1b45ec174689e6..aba1a6b640c4d441d936ce4101500eba
              "UID SEARCH",
              IMAP_COMMAND_TIMEOUT_SECS,
 -            sess.uid_search(criteria),
-+            checked_uid_search(sess, &criteria),
++            checked_uid_search(sess, criteria),
          )
          .await?
          .into_iter()
@@ -2477,10 +2477,35 @@ index addedcdbf5ca3927832c25521f6046f5f51a3a68..4b6bc49ebecc7cfe5264579ec0d56108
      if is_permanent {
          state
 diff --git a/src-tauri/src/commands/messages/provider_dispatch.rs b/src-tauri/src/commands/messages/provider_dispatch.rs
-index fadfd3835310dbc51f5398822c30662a329ac442..dd4061190c7f6775591a011e063075fdc4955bc9 100644
+index fadfd3835310dbc51f5398822c30662a329ac442..6109fd5838736f0ccbe99a75c011812c297534fe 100644
 --- a/src-tauri/src/commands/messages/provider_dispatch.rs
 +++ b/src-tauri/src/commands/messages/provider_dispatch.rs
-@@ -185,6 +185,7 @@ pub(crate) fn queue_mail_op(
+@@ -162,10 +162,23 @@ pub(crate) fn local_previous_state(store: &Store, message: &Message) -> Result<P
+ pub(crate) fn queue_mail_op(
+     store: &Store,
+     message: &Message,
+-    op: MailOp,
++    mut op: MailOp,
+     local_commit: bool,
+     error: Option<&str>,
+ ) -> Result<RemoteMutationOutcome> {
++    // Discovery can happen during the failed first attempt. Record its stable
++    // target before enqueueing, so a retry after the folder cache is populated
++    // is still the same intent rather than a second deletion.
++    if let MailOp::Delete(delete) = &mut op {
++        if delete.trash_folder_id.is_none() && delete.trash_folder_remote_id.is_none() {
++            if let Some(trash) =
++                store.find_folder_by_role(&message.account_id, FolderRole::Trash)?
++            {
++                delete.trash_folder_id = Some(trash.id);
++                delete.trash_folder_remote_id = Some(trash.remote_id);
++            }
++        }
++    }
+     let op_type = op.op_type();
+     let previous = if local_commit {
+         Some(local_previous_state(store, message)?)
+@@ -185,6 +198,7 @@ pub(crate) fn queue_mail_op(
                  RemoteMutationOutcome::Queued
              })
          }
@@ -2488,7 +2513,7 @@ index fadfd3835310dbc51f5398822c30662a329ac442..dd4061190c7f6775591a011e063075fd
          // The new op undoes a queued op that never reached the server, so
          // the remote already matches the state this change produces locally.
          PendingMailOpEnqueue::Cancelled { cancelled_op_id } => {
-@@ -291,6 +292,31 @@ fn recorded_labels(add: &Option<Vec<String>>, remove: &Option<Vec<String>>) -> O
+@@ -291,6 +305,31 @@ fn recorded_labels(add: &Option<Vec<String>>, remove: &Option<Vec<String>>) -> O
      }
  }
  
@@ -2520,7 +2545,7 @@ index fadfd3835310dbc51f5398822c30662a329ac442..dd4061190c7f6775591a011e063075fd
  /// Perform the remote half of `op`. Local state is not touched.
  async fn execute_remote(
      state: &AppState,
-@@ -387,11 +413,21 @@ async fn execute_remote(
+@@ -387,11 +426,21 @@ async fn execute_remote(
                  delete.source_folder_id.as_deref(),
                  delete.source_folder_remote_id.as_deref(),
              );
@@ -2547,7 +2572,7 @@ index fadfd3835310dbc51f5398822c30662a329ac442..dd4061190c7f6775591a011e063075fd
              remote
                  .trash(
                      msg,
-@@ -487,6 +523,13 @@ impl RemoteSession {
+@@ -487,6 +536,13 @@ impl RemoteSession {
          }
      }
  
@@ -2561,7 +2586,7 @@ index fadfd3835310dbc51f5398822c30662a329ac442..dd4061190c7f6775591a011e063075fd
      pub fn is_connected(&self) -> bool {
          matches!(self, Self::Connected(_))
      }
-@@ -510,15 +553,30 @@ impl RemoteSession {
+@@ -510,15 +566,30 @@ impl RemoteSession {
                      error: None,
                  })
              }
@@ -2599,7 +2624,7 @@ index fadfd3835310dbc51f5398822c30662a329ac442..dd4061190c7f6775591a011e063075fd
                      }
                      Err(error) => (false, error.to_string()),
                  }
-@@ -574,6 +632,218 @@ mod tests {
+@@ -574,6 +645,218 @@ mod tests {
      use pebble_core::{Account, FolderType};
      use pebble_store::pending_ops::{FlagsOp, PendingMailOpStatus};
  
@@ -2818,7 +2843,7 @@ index fadfd3835310dbc51f5398822c30662a329ac442..dd4061190c7f6775591a011e063075fd
      fn state(provider: ProviderType) -> AppState {
          let store = Store::open_in_memory().unwrap();
          store
-@@ -644,6 +914,42 @@ mod tests {
+@@ -644,6 +927,42 @@ mod tests {
          })
      }
  

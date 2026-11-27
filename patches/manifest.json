@@ -2,7 +2,7 @@
   "base_commit": "0119ed2ab59013abad66f5f96a5c715342c3a2a4",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "1a083abbd48078bcec63953db5998d11229f22458bef7ad61873f358c08268c0",
+  "sha256": "94ca4d4b312163709c068b139fa7633b8c783d9befc074a6ced1212012743b39",
   "files": [
     "crates/pebble-core/src/traits.rs",
     "crates/pebble-mail/src/imap/connect.rs",
