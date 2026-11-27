@@ -109,6 +109,18 @@ jobs:
       - name: Run Rust tests
         run: cargo test --workspace --all-targets
 
+      - name: Check generated IPC bindings
+        run: cargo test -p pebble --lib ipc_bindings
+
+      - name: Test release OAuth configuration policy
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_MANIFEST_DIR: ${{ github.workspace }}/src-tauri
+        run: |
+          rustc --edition 2021 --test -C debug-assertions=no src-tauri/src/commands/oauth_runtime.rs -o "$RUNNER_TEMP/oauth-runtime-tests"
+          "$RUNNER_TEMP/oauth-runtime-tests"
+
       - name: Run frontend tests
         run: pnpm test
 
