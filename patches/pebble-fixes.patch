@@ -1467,10 +1467,10 @@ index ff2da709f48b81f284ca82c9189bd7fb2f602a2a..938efd073985b4824f7f520b93d9c826
                  Ok(()) = stop_rx.changed() => {
                      if *stop_rx.borrow() {
 diff --git a/crates/pebble-mail/src/sync/tests.rs b/crates/pebble-mail/src/sync/tests.rs
-index 72bb4d16f2b1d66d14ebba8d09dcb50e709efed1..2a66700cf62dc9c8fbb482a5d66287672d7aef81 100644
+index 72bb4d16f2b1d66d14ebba8d09dcb50e709efed1..95ceea7ef5dc70f6d0a914fc3d4085adf031c1dc 100644
 --- a/crates/pebble-mail/src/sync/tests.rs
 +++ b/crates/pebble-mail/src/sync/tests.rs
-@@ -1065,3 +1065,370 @@ fn imap_full_poll_targets_all_remote_folders() {
+@@ -1065,3 +1065,374 @@ fn imap_full_poll_targets_all_remote_folders() {
          ImapPollScope::Full
      ));
  }
@@ -1524,6 +1524,10 @@ index 72bb4d16f2b1d66d14ebba8d09dcb50e709efed1..2a66700cf62dc9c8fbb482a5d6628767
 +            result.unwrap();
 +            assert!(store.get_message("retained").unwrap().unwrap().is_deleted);
 +        } else {
++            assert!(
++                server.command_count("UID SEARCH") > 0,
++                "failure injection must reach SEARCH"
++            );
 +            assert!(result.is_err(), "Failed inventory must stop reconciliation");
 +            assert!(!store.get_message("retained").unwrap().unwrap().is_deleted);
 +        }
@@ -1843,10 +1847,10 @@ index 72bb4d16f2b1d66d14ebba8d09dcb50e709efed1..2a66700cf62dc9c8fbb482a5d6628767
 +}
 diff --git a/crates/pebble-mail/src/test_imap.rs b/crates/pebble-mail/src/test_imap.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..2a4d599a3fe07e84dd51e00aaf5e782b204cefb7
+index 0000000000000000000000000000000000000000..0ebf77d2690b8653e24578d2bba1f0c4088d36c8
 --- /dev/null
 +++ b/crates/pebble-mail/src/test_imap.rs
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,258 @@
 +// Local, credential-free IMAP fixtures for connection and deletion regressions.
 +use std::sync::atomic::{AtomicUsize, Ordering};
 +use std::sync::{Arc, Mutex};
@@ -1996,11 +2000,15 @@ index 0000000000000000000000000000000000000000..2a4d599a3fe07e84dd51e00aaf5e782b
 +                                    format!("{tag} NO [NOPERM] Permission denied\r\n")
 +                                }
 +                                Behavior::MissingInbox => format!("{tag} NO SELECT Folder not exist\r\n"),
++                                // Exercise SEARCH failure, not the valid zero-EXISTS fast path.
++                                Behavior::SearchDenied | Behavior::SearchBad | Behavior::SearchDropped =>
++                                    format!("* FLAGS (\\Seen)\r\n* 1 EXISTS\r\n* OK [UIDVALIDITY 42] UIDs valid\r\n* OK [UIDNEXT 8] Next UID\r\n{tag} OK SELECT completed\r\n"),
 +                                _ => format!("* FLAGS (\\Seen)\r\n* 0 EXISTS\r\n* OK [UIDVALIDITY 42] UIDs valid\r\n* OK [UIDNEXT 1] Next UID\r\n{tag} OK [READ-WRITE] SELECT completed\r\n"),
 +                            }
 +                        } else if command == "UID" {
 +                            match words.next().unwrap_or("").to_ascii_uppercase().as_str() {
 +                                "SEARCH" => {
++                                    recorded.lock().unwrap().push("UID SEARCH".into());
 +                                    let uid = if selected == "&XfJSIJZk-" && moved {
 +                                        " 42"
 +                                    } else if selected == "INBOX" && !moved {

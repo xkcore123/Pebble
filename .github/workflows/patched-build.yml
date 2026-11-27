@@ -69,6 +69,8 @@ jobs:
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -107,7 +109,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Rust tests
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --no-fail-fast
 
       - name: Check generated IPC bindings
         run: cargo test -p pebble --lib ipc_bindings
