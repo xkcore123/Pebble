@@ -1,6 +1,6 @@
 [package]
 name = "pebble-mail"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -9,6 +9,7 @@ pebble-store = { path = "../pebble-store" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ts-rs = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 async-imap = { workspace = true }

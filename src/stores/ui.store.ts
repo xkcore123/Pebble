@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { isNarrowWindow } from "@/lib/narrowWindow";
 import i18n from "@/lib/i18n";
 import { getInitialLanguage, LANGUAGE_STORAGE_KEY, type Language } from "@/lib/language";
 import { profileLocalStorage, profileSessionStorage } from "@/lib/profileStorage";
@@ -44,6 +45,18 @@ const DEFAULT_BACKGROUND_IMAGE_OPACITY = 0.35;
 const MIN_BACKGROUND_IMAGE_OPACITY = 0.05;
 const MAX_BACKGROUND_IMAGE_OPACITY = 1;
 const SIDEBAR_STYLE_KEY = "pebble-sidebar-style";
+const HTML_MAIL_DARK_MODE_KEY = "pebble-html-mail-dark-mode";
+
+/**
+ * How HTML mail looks in the dark theme: "off" keeps it on a light card,
+ * "auto" darkens mail that only uses plain backgrounds, "force" inverts it.
+ */
+export type HtmlMailDarkMode = "off" | "auto" | "force";
+
+function readHtmlMailDarkMode(): HtmlMailDarkMode {
+  const stored = profileLocalStorage.getItem(HTML_MAIL_DARK_MODE_KEY);
+  return stored === "auto" || stored === "force" ? stored : "off";
+}
 
 function readSidebarStyle(): SidebarStyle {
   return profileLocalStorage.getItem(SIDEBAR_STYLE_KEY) === "classic" ? "classic" : "grouped";
@@ -138,6 +151,8 @@ export function applyThemeToDom(theme: Theme) {
 
 interface UIState {
   sidebarCollapsed: boolean;
+  /** Narrow windows only: the user expanded the icon rail (not persisted). */
+  sidebarNarrowExpanded: boolean;
   activeView: ActiveView;
   theme: Theme;
   backgroundImage: BackgroundImageSettings | null;
@@ -167,6 +182,8 @@ interface UIState {
   clearBackgroundImage: () => void;
   sidebarStyle: SidebarStyle;
   setSidebarStyle: (style: SidebarStyle) => void;
+  htmlMailDarkMode: HtmlMailDarkMode;
+  setHtmlMailDarkMode: (mode: HtmlMailDarkMode) => void;
   setLanguage: (lang: Language) => void;
   setSyncStatus: (status: "idle" | "syncing" | "error") => void;
   setNetworkStatus: (status: NetworkStatus) => void;
@@ -187,6 +204,7 @@ interface UIState {
 
 export const useUIStore = create<UIState>((set) => ({
   sidebarCollapsed: false,
+  sidebarNarrowExpanded: false,
   activeView: "inbox",
   theme: (profileLocalStorage.getItem("pebble-theme") as Theme) || "light",
   backgroundImage: initialBackgroundImage,
@@ -214,7 +232,9 @@ export const useUIStore = create<UIState>((set) => ({
   previousView: "inbox",
   pendingContactId: null,
   toggleSidebar: () =>
-    set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+    set((state) => (isNarrowWindow()
+      ? { sidebarNarrowExpanded: !state.sidebarNarrowExpanded }
+      : { sidebarCollapsed: !state.sidebarCollapsed })),
   setActiveView: (view) => {
     const state = useUIStore.getState();
     if (state.activeView === view) {
@@ -251,6 +271,7 @@ export const useUIStore = create<UIState>((set) => ({
     useMailStore.setState({
       selectedMessageId: messageId,
       selectedThreadId: null,
+      selectedThreadAccountId: null,
       threadView: false,
       selectedMessageIds: new Set(),
       batchMode: false,
@@ -301,6 +322,11 @@ export const useUIStore = create<UIState>((set) => ({
   setSidebarStyle: (style) => {
     profileLocalStorage.setItem(SIDEBAR_STYLE_KEY, style);
     set({ sidebarStyle: style });
+  },
+  htmlMailDarkMode: readHtmlMailDarkMode(),
+  setHtmlMailDarkMode: (mode) => {
+    profileLocalStorage.setItem(HTML_MAIL_DARK_MODE_KEY, mode);
+    set({ htmlMailDarkMode: mode });
   },
   setLanguage: (lang) => {
     i18n.changeLanguage(lang);

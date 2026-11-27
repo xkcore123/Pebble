@@ -6,7 +6,9 @@ use serde::Deserialize;
 use tauri::State;
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, ts(optional_fields = nullable))]
 pub struct AdvancedSearchQuery {
     pub text: Option<String>,
     pub from: Option<String>,
@@ -25,9 +27,10 @@ pub async fn advanced_search(
     limit: Option<usize>,
 ) -> std::result::Result<Vec<SearchHit>, PebbleError> {
     let search = state.search.clone();
+    let store = state.store.clone();
     let limit = limit.unwrap_or(50);
     tokio::task::spawn_blocking(move || {
-        search.advanced_search(AdvancedSearchParams {
+        let hits = search.advanced_search(AdvancedSearchParams {
             text: query.text.as_deref(),
             from: query.from.as_deref(),
             to: query.to.as_deref(),
@@ -37,7 +40,8 @@ pub async fn advanced_search(
             has_attachment: query.has_attachment,
             folder_id: query.folder_id.as_deref(),
             limit,
-        })
+        })?;
+        super::search::attach_account_ids(&store, hits)
     })
     .await
     .map_err(|e| PebbleError::Internal(format!("Task join error: {e}")))?

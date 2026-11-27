@@ -155,12 +155,8 @@ vi.mock("../../src/app/lazyViewPreload", () => ({
   scheduleLazyViewPreload: vi.fn(),
 }));
 
-vi.mock("../../src/stores/kanban.store", () => ({
-  useKanbanStore: {
-    getState: () => ({
-      fetchCards: vi.fn().mockResolvedValue(undefined),
-    }),
-  },
+vi.mock("../../src/hooks/queries/useKanbanCardsQuery", () => ({
+  useKanbanCardsQuery: vi.fn(() => ({ data: [] })),
 }));
 
 describe("Layout navigation", () => {
@@ -181,7 +177,8 @@ describe("Layout navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     expect(screen.getByRole("button", { name: "Settings" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByText("Loading...")).toBeTruthy();
+    // Stale content is gone immediately; the spinner itself is delayed so fast loads never flash it.
     expect(screen.queryByText("Inbox panel")).toBeNull();
+    expect(await screen.findByText("Loading...")).toBeTruthy();
   });
 });

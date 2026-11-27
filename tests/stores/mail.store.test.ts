@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { useMailStore } from "../../src/stores/mail.store";
+import { isThreadSelected, useMailStore } from "../../src/stores/mail.store";
 
 describe("MailStore", () => {
   beforeEach(() => {
@@ -8,6 +8,7 @@ describe("MailStore", () => {
       activeFolderId: null,
       selectedMessageId: null,
       selectedThreadId: null,
+      selectedThreadAccountId: null,
       threadView: false,
     });
   });
@@ -79,5 +80,50 @@ describe("MailStore", () => {
     expect(state.threadView).toBe(true);
     expect(state.selectedMessageId).toBeNull();
     expect(state.selectedThreadId).toBeNull();
+  });
+
+  it("selects threads by (account_id, thread_id)", () => {
+    useMailStore.getState().selectThread({ thread_id: "t1", account_id: "a2" });
+    const state = useMailStore.getState();
+    expect(state.selectedThreadId).toBe("t1");
+    expect(state.selectedThreadAccountId).toBe("a2");
+    expect(isThreadSelected(state, { thread_id: "t1", account_id: "a2" })).toBe(true);
+    expect(isThreadSelected(state, { thread_id: "t1", account_id: "a1" })).toBe(false);
+    expect(isThreadSelected(state, { thread_id: "t2", account_id: "a2" })).toBe(false);
+
+    useMailStore.getState().selectThread(null);
+    expect(useMailStore.getState().selectedThreadAccountId).toBeNull();
+  });
+
+  it("clears the selected thread's account with the thread", () => {
+    useMailStore.getState().setSelectedThreadId("t1", "a1");
+    useMailStore.getState().setActiveFolderId("f1");
+    expect(useMailStore.getState().selectedThreadAccountId).toBeNull();
+    useMailStore.getState().setSelectedThreadId("t1", "a1");
+    useMailStore.getState().toggleThreadView();
+    expect(useMailStore.getState().selectedThreadAccountId).toBeNull();
+  });
+
+  it("keeps the unified account filter across unified folders and clears it when leaving", () => {
+    const store = useMailStore.getState();
+    store.setActiveAccountId(null);
+    store.setActiveFolderId("all:inbox");
+    useMailStore.setState({ selectedMessageId: "m-1", batchMode: true });
+
+    useMailStore.getState().setUnifiedAccountFilter("acct-2");
+    expect(useMailStore.getState().unifiedAccountFilter).toBe("acct-2");
+    // Changing the filter drops the selection from the old list.
+    expect(useMailStore.getState().selectedMessageId).toBeNull();
+    expect(useMailStore.getState().batchMode).toBe(false);
+
+    useMailStore.getState().setActiveFolderId("all:sent");
+    expect(useMailStore.getState().unifiedAccountFilter).toBe("acct-2");
+
+    useMailStore.getState().setActiveFolderId("acct-1-inbox");
+    expect(useMailStore.getState().unifiedAccountFilter).toBeNull();
+
+    useMailStore.getState().setUnifiedAccountFilter("acct-1");
+    useMailStore.getState().setActiveAccountId("acct-1");
+    expect(useMailStore.getState().unifiedAccountFilter).toBeNull();
   });
 });

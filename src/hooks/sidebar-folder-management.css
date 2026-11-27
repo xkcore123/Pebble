@@ -1,0 +1,18 @@
+/* Keyboard-only "Manage folders" entry: off-screen until focused, then shown
+   as a secondary button (.btn--secondary.btn--sm) over the sidebar corner. */
+.sidebar-keyboard-only-action {
+  position: fixed;
+  left: var(--space-2);
+  bottom: var(--space-2);
+  z-index: var(--z-menu);
+  box-shadow: var(--shadow-popover);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-240px);
+}
+
+.sidebar-keyboard-only-action:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}

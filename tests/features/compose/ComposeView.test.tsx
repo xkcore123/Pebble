@@ -32,6 +32,9 @@ const mocks = vi.hoisted(() => ({
   cancelCloseCompose: vi.fn(),
   showComposeLeaveConfirm: false,
   quotedReplyHtml: "",
+  editorMode: "rich" as "rich" | "markdown" | "html",
+  htmlPreview: false,
+  rawSource: "",
   composeDraft: null as DraftData | null,
   accountsQuery: {
     data: [{ id: "account-1", email: "me@example.com", display_name: "Me" }],
@@ -122,11 +125,11 @@ vi.mock("../../../src/hooks/useComposeEditor", () => ({
       getText: () => "Hello",
       commands: { setContent: vi.fn() },
     },
-    editorMode: "rich",
-    rawSource: "",
+    editorMode: mocks.editorMode,
+    rawSource: mocks.rawSource,
     setRawSource: vi.fn(),
     richTextHtml: "<p>Hello</p>",
-    htmlPreview: false,
+    htmlPreview: mocks.htmlPreview,
     setHtmlPreview: vi.fn(),
     switchMode: vi.fn(),
     textareaRef: { current: null },
@@ -170,12 +173,6 @@ vi.mock("../../../src/features/compose/ComposeToolbar", () => ({
   ),
   EditorToolbar: () => <div />,
   MarkdownToolbar: () => <div />,
-  composeStyles: {
-    backBtn: {},
-    fieldRow: {},
-    fieldLabel: {},
-    toggleBtn: {},
-  },
 }));
 
 vi.mock("@tiptap/react", () => ({
@@ -194,6 +191,7 @@ vi.mock("../../../src/stores/confirm.store", () => ({
 
 vi.mock("../../../src/stores/toast.store", () => ({
   useToastStore: { getState: () => ({ addToast: mocks.addToast }) },
+  toastError: (err: unknown) => mocks.addToast({ type: "error", message: String((err as Error)?.message ?? err) }),
 }));
 
 vi.mock("../../../src/lib/api", () => ({
@@ -271,6 +269,9 @@ describe("ComposeView", () => {
     mocks.cancelCloseCompose.mockReset();
     mocks.showComposeLeaveConfirm = false;
     mocks.quotedReplyHtml = "";
+    mocks.editorMode = "rich";
+    mocks.htmlPreview = false;
+    mocks.rawSource = "";
     mocks.accountsQuery.data = [{ id: "account-1", email: "me@example.com", display_name: "Me" }];
     mocks.accountsQuery.isLoading = false;
     mocks.accountsQuery.isSuccess = true;
@@ -346,6 +347,72 @@ describe("ComposeView", () => {
     expect(mocks.mutate).not.toHaveBeenCalled();
   });
 
+  it("places schedule next to send as the secondary action", () => {
+    render(<ComposeView />);
+
+    const schedule = screen.getByRole("button", { name: "sendControls.schedule" }) as HTMLButtonElement;
+    const send = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
+
+    expect(schedule.parentElement).toBe(send.parentElement);
+    expect(schedule.getAttribute("aria-expanded")).toBe("false");
+    expect(send.className).toContain("btn--primary");
+    expect(schedule.className).toContain("btn--secondary");
+  });
+
+  it("explains why send is disabled", () => {
+    mocks.recipients.to = [];
+    render(<ComposeView />);
+
+    const send = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    const reasonId = send.getAttribute("aria-describedby");
+    expect(reasonId).toBeTruthy();
+    expect(document.getElementById(reasonId!)?.textContent).toBe("Add a recipient");
+  });
+
+  it("sends with Cmd/Ctrl+Enter from inside the form", async () => {
+    render(<ComposeView />);
+
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Subject" }), { key: "Enter", metaKey: true });
+
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledOnce());
+  });
+
+  it("does not send with Cmd/Ctrl+Enter while send is unavailable and says why", async () => {
+    mocks.recipients.to = [];
+    render(<ComposeView />);
+
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Subject" }), { key: "Enter", ctrlKey: true });
+
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Add a recipient");
+    expect(mocks.mutate).not.toHaveBeenCalled();
+  });
+
+  it("focuses the To field when composing a new message", async () => {
+    mocks.recipients.to = [];
+    render(<ComposeView />);
+
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "To" })));
+  });
+
+  it("keeps a send failure visible until dismissed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.mutate.mockImplementation((_args, options: { onError: (error: unknown) => void }) => {
+        options.onError({ kind: "Network", message: "connection reset" });
+      });
+      render(<ComposeView />);
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      const alert = await screen.findByRole("alert");
+      act(() => { vi.advanceTimersByTime(30_000); });
+      expect(alert.isConnected).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("persists the chosen local schedule with durable source ownership before closing", async () => {
     const due = new Date(Date.now() + 86400000);
     const value = `${due.getFullYear()}-${String(due.getMonth()+1).padStart(2,"0")}-${String(due.getDate()).padStart(2,"0")}T12:30`;
@@ -368,7 +435,8 @@ describe("ComposeView", () => {
     render(<ComposeView />);
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await screen.findByText("sendControls.queueReplyUnknown");
-    expect((screen.getByRole("button", { name: "Sending..." }) as HTMLButtonElement).disabled).toBe(true);
+    // In-flight sends keep the button focusable but inert (aria-disabled + aria-busy).
+    expect(screen.getByRole("button", { name: "Sending..." }).getAttribute("aria-disabled")).toBe("true");
     expect(mocks.resumeDraftSaves).not.toHaveBeenCalled();
     expect(mocks.mutate).not.toHaveBeenCalled();
     expect(deleteDraft).not.toHaveBeenCalled();
@@ -414,7 +482,7 @@ describe("ComposeView", () => {
     fireEvent.click(sendButton);
 
     expect(mocks.mutate).toHaveBeenCalledOnce();
-    expect(sendButton.disabled).toBe(true);
+    expect(sendButton.getAttribute("aria-disabled")).toBe("true");
 
     await act(async () => pendingDeletion.resolve());
     await waitFor(() => expect(mocks.closeCompose).toHaveBeenCalledOnce());
@@ -515,17 +583,34 @@ describe("ComposeView", () => {
     ));
   });
 
-  it("keeps quoted replies collapsed until the user expands them", () => {
+  it("renders the HTML source preview in a fully sandboxed iframe", () => {
+    mocks.editorMode = "html";
+    mocks.htmlPreview = true;
+    mocks.rawSource = "<p>Preview</p>";
+
+    render(<ComposeView />);
+
+    const iframe = document.querySelector("iframe.compose-html-preview");
+    expect(iframe).not.toBeNull();
+    expect(iframe!.hasAttribute("sandbox")).toBe(true);
+    expect(iframe!.getAttribute("sandbox")).not.toContain("allow-same-origin");
+    expect(iframe!.getAttribute("sandbox")).not.toContain("allow-scripts");
+  });
+
+  it("shows quoted replies inline by default and lets the user collapse them", () => {
     mocks.quotedReplyHtml = "<blockquote><p>Original message body</p></blockquote>";
 
     render(<ComposeView />);
 
-    expect(screen.getByRole("button", { name: "Show quoted message" })).toBeTruthy();
+    const quotedBody = screen.getByText("Original message body");
+    expect(quotedBody).toBeTruthy();
+    expect(document.querySelector(".compose-editor-surface")?.contains(quotedBody)).toBe(true);
+    expect(screen.getByRole("button", { name: "Hide quoted message" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide quoted message" }));
+
     expect(screen.queryByText("Original message body")).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Show quoted message" }));
-
-    expect(screen.getByText("Original message body")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Show quoted message" })).toBeTruthy();
   });
 
   it("uses the first attached filename as an empty subject", async () => {

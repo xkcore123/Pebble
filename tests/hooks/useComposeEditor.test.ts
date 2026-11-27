@@ -3,6 +3,7 @@ import {
   appendReplyQuoteHtml,
   buildComposeEditorContent,
   buildReplyQuoteHtml,
+  initialRawSource,
   shouldApplyInitialEditorContent,
 } from "../../src/hooks/useComposeEditor";
 import type { Message } from "../../src/lib/ipc-types";
@@ -97,7 +98,10 @@ describe("buildComposeEditorContent", () => {
           '<style>#root { display: none }</style>' +
           '<link rel="stylesheet" href="https://tracker.example/mail.css">' +
           '<p style="color: red">Hello</p>' +
-          '<img src="https://tracker.example/pixel" srcset="https://tracker.example/2x 2x">',
+          '<img src="https://tracker.example/pixel" srcset="https://tracker.example/2x 2x">' +
+          '<img src=" \\\\tracker.example\\pixel">' +
+          '<img src="ht\nttps://tracker.example/obfuscated-pixel">' +
+          '<img src="data:image/png;base64,cG5nLWZpeHR1cmU=">',
       }),
       t,
     });
@@ -108,6 +112,7 @@ describe("buildComposeEditorContent", () => {
     expect(quote).not.toContain("<link");
     expect(quote).not.toContain("tracker.example");
     expect(quote).not.toContain("srcset");
+    expect(quote).toContain('src="data:image/png;base64,cG5nLWZpeHR1cmU="');
   });
 
   it("appends the quoted reply only when sending", () => {
@@ -138,5 +143,36 @@ describe("buildComposeEditorContent", () => {
       signatureReady: true,
       hasRestoredDraft: false,
     })).toBe(true);
+  });
+});
+
+describe("compose untrusted content", () => {
+  it("sanitizes the assembled reply quote and blocks SVG <style> escapes", () => {
+    const quote = buildReplyQuoteHtml({
+      composeReplyTo: makeMessage({
+        body_html_raw:
+          '<svg><style><a>&lt;/style&gt;&lt;div style="position:fixed;inset:0;z-index:99999"&gt;x&lt;/div&gt;</a></style></svg>' +
+          '<p class="fixed inset-0" style="position:absolute;color:red">Body</p>',
+      }),
+      t,
+    });
+    const template = document.createElement("template");
+    template.innerHTML = quote;
+
+    expect(template.content.querySelector("div")).toBeNull();
+    expect(quote).not.toMatch(/position|z-index|inset/i);
+    expect(template.content.querySelector("blockquote")?.className).toBe("compose-original-quote");
+    expect(template.content.querySelector("p.fixed")).toBeNull();
+    expect(quote).toContain("Body");
+  });
+
+  it("treats a mailto body as plain text for the raw source", () => {
+    const raw = initialRawSource(null, '<img src=x onerror="alert(1)">\nsecond line');
+
+    expect(raw).not.toContain("<img");
+    expect(raw).toContain("&lt;img");
+    expect(raw).toContain("<p>second line</p>");
+    expect(initialRawSource(null, undefined)).toBe("");
+    expect(initialRawSource({ rawSource: "<b>draft</b>" }, "ignored")).toBe("<b>draft</b>");
   });
 });
