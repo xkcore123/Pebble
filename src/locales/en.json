@@ -83,6 +83,8 @@
     "quit": "Quit Pebble"
   },
   "sidebar": {
+    "collapseFolder": "Collapse {{name}}",
+    "expandFolder": "Expand {{name}}",
     "outbox": "Outbox",
     "inbox": "Inbox",
     "sent": "Sent",
@@ -554,6 +556,28 @@
     "openMessage": "Open message",
     "toggleStar": "Toggle star",
     "archiveMessage": "Archive message",
+    "deleteMessage": "Move message to trash",
+    "vim": {
+      "title": "Vim keys",
+      "enable": "Enable vim keys",
+      "description": "Press sequences like d d or g i within one second. Your own shortcuts above take priority.",
+      "nextPrev": "Next / previous message",
+      "firstLast": "First / last message",
+      "open": "Open message",
+      "close": "Close message",
+      "delete": "Move message to trash",
+      "goInbox": "Go to Inbox",
+      "goSent": "Go to Sent",
+      "goDrafts": "Go to Drafts",
+      "goArchive": "Go to Archive",
+      "goTrash": "Go to Trash",
+      "page": "Move down / up 10 messages",
+      "select": "Select message (d d, Delete and e then act on the selection)",
+      "undo": "Undo the last delete or archive",
+      "help": "Show keyboard shortcuts",
+      "nothingToUndo": "Nothing to undo",
+      "blocked": "{{keys}} is your shortcut for {{action}}, so vim keys starting with it won't work."
+    },
     "toggleView": "Toggle Inbox/Kanban view",
     "moveToKanban": "Add to Kanban",
     "openSearch": "Open search",
@@ -683,7 +707,15 @@
     "dragStart": "Picked up {{subject}}.",
     "dragOver": "{{subject}} is over {{column}}.",
     "dragEnd": "Dropped {{subject}} in {{column}}.",
-    "dragCancel": "Moving {{subject}} was cancelled."
+    "dragCancel": "Moving {{subject}} was cancelled.",
+    "title": "Kanban board",
+    "summary": "{{open}} open · {{done}} done",
+    "emptySummary": "Add mail from the reader's toolbar to track it here.",
+    "todoHint": "Mail you still need to act on",
+    "waitingHint": "Waiting on someone else",
+    "doneHint": "Finished items land here",
+    "markDone": "Mark done",
+    "reopen": "Move back to To do"
   },
   "accountSetup": {
     "title": "Add email account",
@@ -1048,5 +1080,10 @@
   "participants": {
     "more": "+{{count}} more",
     "showLess": "Show less"
+  },
+  "startup": {
+    "migrating": "Upgrading your mail data…",
+    "migratingHint": "This happens once after an update. Please keep Pebble open.",
+    "failed": "Pebble couldn't open its data"
   }
 }
