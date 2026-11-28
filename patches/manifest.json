@@ -1,10 +1,10 @@
 {
-  "base_commit": "0119ed2ab59013abad66f5f96a5c715342c3a2a4",
+  "base_commit": "1dfc9070dda80cc525fe442be54054fab6fffa55",
   "compatible_upstream_commit": "1dfc9070dda80cc525fe442be54054fab6fffa55",
-  "compatibility_note": "2026-11-28: unchanged overlay applies to upstream 0.2.1. New-account IMAP default folder selection does not replace server Trash discovery; keyboard deletion uses the shared guarded mail action path. OAuth implementation and schema23 are unchanged. Startup migration now runs in the background with progress.",
+  "compatibility_note": "2026-11-28: based on upstream 0.2.1, with retained OAuth/IMAP safety and a regression fix for MessageList hooks added by upstream #118.",
   "source_commit": "b539053ae69a2af9dc9a7dd73a8392c3430d9b0e",
   "patch": "pebble-fixes.patch",
-  "sha256": "b06a9657a9b3273a4d590e9a76f5e401ef0df0e19c117ccc4e9995add35116f3",
+  "sha256": "be7b96355e70f8f9c7f84a45f9e6befd3b24275162dfaf1f88a3bf559848f178",
   "files": [
     "crates/pebble-core/src/traits.rs",
     "crates/pebble-mail/src/imap/connect.rs",
@@ -31,9 +31,11 @@
     "src-tauri/src/commands/oauth_runtime.rs",
     "src-tauri/src/commands/pending_mail_ops.rs",
     "src-tauri/src/commands/sync_cmd.rs",
+    "src/components/MessageList.tsx",
     "src/hooks/mutations/mailActions.ts",
     "src/locales/en.json",
     "src/locales/zh.json",
+    "tests/components/MessageList.test.tsx",
     "tests/features/settings/AccountsTab.imap-folders.test.tsx",
     "tests/hooks/mailActions.test.ts"
   ],
@@ -137,6 +139,15 @@
         "tests/hooks/mailActions.test.ts"
       ],
       "description": "Adapt retained IMAP safety, deletion retry/destination identity, cache-merge and ordered sync recovery to upstream 0.2.0 modules and typed RemoteSession/MailOp. Retire upstream-covered archive/status timer fixes. Restrict release OAuth overrides to executable-adjacent local configuration; retain explicit installed Microsoft secret compatibility and test production policy with debug assertions disabled. Preserve schema23 message bodies during cache merge."
+    },
+    {
+      "date": "2026-11-28",
+      "based_on_commit": "789be9e15dfe0af7a765da8de673b8f2f58e68f1",
+      "files": [
+        "src/components/MessageList.tsx",
+        "tests/components/MessageList.test.tsx"
+      ],
+      "description": "Keep Vim bulk-action hooks unconditional across loading/empty/populated list transitions. Ignore bulk keyboard requests while loading. Reproduced the installed candidate view crash and failing hook-order regression before repair."
     }
   ],
   "original_base_commit": "56b6a28dcbcf0b64c6161598f4e0d17a380bec97"

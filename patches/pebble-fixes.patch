@@ -1046,7 +1046,7 @@ index dcecad7f7794918df44f1f7c78514733642f429b..09faf1c69a0a33138a78199b25a054ce
  
      async fn delete_permanently(
 diff --git a/crates/pebble-mail/src/sync/imap_cursor.rs b/crates/pebble-mail/src/sync/imap_cursor.rs
-index 44347db9a79bc43e31e5f726ffa33780ddce409f..caa676e1776feb39bfd217086b852edb46ee516b 100644
+index 589917fe5bd9a7d0f62c648a3dc0928e8bf6c32c..c0e2a1d3896bf9b3fc17acdd394a0a6c70150d50 100644
 --- a/crates/pebble-mail/src/sync/imap_cursor.rs
 +++ b/crates/pebble-mail/src/sync/imap_cursor.rs
 @@ -297,12 +297,17 @@ pub(super) fn is_retryable_imap_connection_error(error: &PebbleError) -> bool {
@@ -1467,10 +1467,10 @@ index ff2da709f48b81f284ca82c9189bd7fb2f602a2a..938efd073985b4824f7f520b93d9c826
                  Ok(()) = stop_rx.changed() => {
                      if *stop_rx.borrow() {
 diff --git a/crates/pebble-mail/src/sync/tests.rs b/crates/pebble-mail/src/sync/tests.rs
-index 72bb4d16f2b1d66d14ebba8d09dcb50e709efed1..95ceea7ef5dc70f6d0a914fc3d4085adf031c1dc 100644
+index fe887df4fcf94d74857cbc4a172adc642de8d056..752daa8117d8f2666ec33116fa5fc441878853be 100644
 --- a/crates/pebble-mail/src/sync/tests.rs
 +++ b/crates/pebble-mail/src/sync/tests.rs
-@@ -1065,3 +1065,374 @@ fn imap_full_poll_targets_all_remote_folders() {
+@@ -1083,3 +1083,374 @@ fn imap_full_poll_targets_all_remote_folders() {
          ImapPollScope::Full
      ));
  }
@@ -3748,11 +3748,65 @@ index d262b34332022b8d5d8719565c0175492f6e2389..f016d85c8f87fba29007b9dc49da0017
      #[test]
      fn thread_refresh_payload_matches_the_mail_new_refresh_contract() {
          let payload = thread_refresh_event_payload(&pebble_mail::ThreadRefresh {
+diff --git a/src/components/MessageList.tsx b/src/components/MessageList.tsx
+index cf029e8644d92d2e2e5c2e6ab60000eb46146033..b405216487a95ae37a1019bfbad51f8c38afe8b3 100644
+--- a/src/components/MessageList.tsx
++++ b/src/components/MessageList.tsx
+@@ -269,19 +269,6 @@ export default function MessageList({
+     }
+   }
+ 
+-  if (loading) {
+-    return <MessageListSkeleton />;
+-  }
+-
+-  if (messages.length === 0) {
+-    return (
+-      <div className="fade-in mail-empty-state">
+-        <Inbox size={32} strokeWidth={1.2} />
+-        {emptyLabel ?? t("common.noMessages")}
+-      </div>
+-    );
+-  }
+-
+   function invalidateMessageViews() {
+     queryClient.invalidateQueries({ queryKey: ["messages"] });
+     queryClient.invalidateQueries({ queryKey: ["threads"] });
+@@ -323,7 +310,7 @@ export default function MessageList({
+ 
+   async function handleMoveAction(kind: "archive" | "trash") {
+     // A ref, not batchLoading: keyboard requests can arrive before a re-render.
+-    if (batchBusyRef.current) return;
++    if (loading || batchBusyRef.current) return;
+     const targets = selectedMessages();
+     if (targets.length === 0) return;
+     batchBusyRef.current = true;
+@@ -383,6 +370,20 @@ export default function MessageList({
+     }
+   }
+ 
++  // All hooks must run before either early return, including the Vim listener.
++  if (loading) {
++    return <MessageListSkeleton />;
++  }
++
++  if (messages.length === 0) {
++    return (
++      <div className="fade-in mail-empty-state">
++        <Inbox size={32} strokeWidth={1.2} />
++        {emptyLabel ?? t("common.noMessages")}
++      </div>
++    );
++  }
++
+   const allSelected = messages.length > 0 && selectedMessageIds.size === messages.length;
+   const virtualItems = virtualizer.getVirtualItems();
+   const activeRowRendered = virtualItems.some((item) => messages[item.index]?.id === effectiveActiveId);
 diff --git a/src/hooks/mutations/mailActions.ts b/src/hooks/mutations/mailActions.ts
-index c25579d0350d8467e35192d897f57258a3fb2979..bdf962b85577c882957b5c5d3a34405e76b6cf64 100644
+index 100081ab8787b170d30a60fdd5817d1ccd709f9e..5171db09a8aa20835c7b89d833145c2a47c773f0 100644
 --- a/src/hooks/mutations/mailActions.ts
 +++ b/src/hooks/mutations/mailActions.ts
-@@ -677,7 +677,7 @@ export function trashConfirmCopy(plan: MailActionPlan) {
+@@ -678,7 +678,7 @@ export function trashConfirmCopy(plan: MailActionPlan) {
      title: t("batch.deleteTitle", "Delete {{count}} messages?", { count }),
      message: includesLocalDraft
        ? t("batch.deleteWithLocalDraftsConfirm",
@@ -3762,10 +3816,10 @@ index c25579d0350d8467e35192d897f57258a3fb2979..bdf962b85577c882957b5c5d3a34405e
          ? t("batch.deletePermanentConfirm", "Permanently delete {{count}} messages? This cannot be undone.", { count })
          : t("batch.deleteConfirm", "Move {{count}} messages to Trash? You can restore them from Trash.", { count }),
 diff --git a/src/locales/en.json b/src/locales/en.json
-index a204fe0b2c290add8fcd5ca12ecbfd2148bf11a8..de512645ad18d56776f69e202e487cbad163f15f 100644
+index e0e75af0e77eae5628d1cf3e7509847949312e4b..71f6fd8050146e6fcf3ce3349982d65a23d8446d 100644
 --- a/src/locales/en.json
 +++ b/src/locales/en.json
-@@ -1009,7 +1009,7 @@
+@@ -1041,7 +1041,7 @@
      "markRead": "Mark as read",
      "markUnread": "Mark as unread",
      "failed": "Batch operation failed",
@@ -3775,10 +3829,10 @@ index a204fe0b2c290add8fcd5ca12ecbfd2148bf11a8..de512645ad18d56776f69e202e487cba
      "selectMessage": "Select message",
      "star": "Star",
 diff --git a/src/locales/zh.json b/src/locales/zh.json
-index bacd6922989bac8483365acc32f9c6e006e5eaa3..0c7af77f3178455279227ff3351a1342329f603f 100644
+index 193292182e5f52db92cad756f6a7ace56e38a7d7..c4df6cd59274b793a66325001218115589a37488 100644
 --- a/src/locales/zh.json
 +++ b/src/locales/zh.json
-@@ -999,7 +999,7 @@
+@@ -1031,7 +1031,7 @@
      "failed": "批量操作失败",
      "deleteTitle": "删除 {{count}} 封邮件？",
      "deleteConfirm": "将 {{count}} 封邮件移至废纸篓？之后可从废纸篓恢复。",
@@ -3787,6 +3841,39 @@ index bacd6922989bac8483365acc32f9c6e006e5eaa3..0c7af77f3178455279227ff3351a1342
      "deleteButton": "删除",
      "selectMessage": "选择邮件",
      "star": "加星标",
+diff --git a/tests/components/MessageList.test.tsx b/tests/components/MessageList.test.tsx
+index deb628523cfddf0c982c0326fa8248135dca507f..aea5cff7f82ae4314164931f5062c49d0f61c518 100644
+--- a/tests/components/MessageList.test.tsx
++++ b/tests/components/MessageList.test.tsx
+@@ -166,6 +166,28 @@ function makeMessage(id: string): MessageSummary {
+ }
+ 
+ describe("MessageList", () => {
++  it("keeps hook order when loading or empty lists become populated and empty again", () => {
++    const props = { selectedMessageId: null, onSelectMessage: vi.fn() };
++    const view = render(<MessageList {...props} messages={[]} loading />);
++    expect(screen.getByText("Loading messages")).toBeTruthy();
++    view.rerender(<MessageList {...props} messages={[makeMessage("m-1")]} loading={false} />);
++    expect(screen.getByTestId("message-m-1")).toBeTruthy();
++    view.rerender(<MessageList {...props} messages={[]} loading={false} />);
++    expect(screen.getByText("common.noMessages")).toBeTruthy();
++    view.rerender(<MessageList {...props} messages={[makeMessage("m-2")]} loading={false} />);
++    expect(screen.getByTestId("message-m-2")).toBeTruthy();
++    view.rerender(<MessageList {...props} messages={[]} loading />);
++    expect(screen.getByText("Loading messages")).toBeTruthy();
++  });
++
++  it("ignores keyboard bulk moves while the message list is loading", async () => {
++    useMailStore.setState({ selectedMessageIds: new Set(["m-1"]), batchMode: true });
++    mocks.runMailAction.mockResolvedValue({ ok: true, count: 1 });
++    render(<MessageList messages={[makeMessage("m-1")]} selectedMessageId={null} onSelectMessage={vi.fn()} loading />);
++    await act(async () => document.dispatchEvent(new CustomEvent(BATCH_MOVE_EVENT, { detail: "trash" })));
++    expect(mocks.runMailAction).not.toHaveBeenCalled();
++  });
++
+   it("sends batch delete through the undoable trash action with a confirm fallback", async () => {
+     const first = { ...makeMessage("m-1"), is_draft: true, remote_id: "" };
+     useMailStore.setState({ batchMode: true, selectedMessageIds: new Set([first.id, "m-2"]) });
 diff --git a/tests/features/settings/AccountsTab.imap-folders.test.tsx b/tests/features/settings/AccountsTab.imap-folders.test.tsx
 index 234eb177824b0a56fe95a3ac5ee6985269c7f38a..672bf49f5f4f8824643a2f6152b09529d983e96b 100644
 --- a/tests/features/settings/AccountsTab.imap-folders.test.tsx
